@@ -113,7 +113,8 @@ private struct StockContent: View {
             StockOpenOrdersSection(model: trade, showsAccount: tradableAccounts.count > 1)
             if let option = parseOccSymbol(route.symbol) {
                 underlyingSection(option)
-            } else {
+            } else if !AnalysisFormat.isCryptoSymbol(route.symbol) {
+                // Crypto has no sector or market split to explain against.
                 analysisLink
             }
             botSection

@@ -86,7 +86,11 @@ final class AnalysisSettingsModel {
         saveTask = Task { [weak self] in
             do { try await sleep(Self.saveDelay) } catch { return }
             guard !Task.isCancelled else { return }
-            await self?.flush()
+            // The timer is done. Drop the handle WITHOUT cancelling it: this
+            // is the task about to send the save, and cancelling it would
+            // cancel that request, which fails silently.
+            self?.saveTask = nil
+            await self?.send()
         }
     }
 
@@ -95,6 +99,10 @@ final class AnalysisSettingsModel {
     func flush() async {
         saveTask?.cancel()
         saveTask = nil
+        await send()
+    }
+
+    private func send() async {
         guard !saving, let change = pending, !change.isEmpty else { return }
         pending = nil
         saving = true
@@ -110,6 +118,6 @@ final class AnalysisSettingsModel {
             if let saved { settings = .loaded(pending.map { $0.applied(to: saved) } ?? saved) }
         }
         saving = false
-        if pending != nil { await flush() }
+        if pending != nil, saveTask == nil { await send() }
     }
 }

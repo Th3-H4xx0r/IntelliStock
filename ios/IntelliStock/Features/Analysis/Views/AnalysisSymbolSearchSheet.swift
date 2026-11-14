@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// Picks a symbol for the analysis screen: the app's symbol search (same
-/// model, same rows as Search) in a sheet, returning the ticker instead of
-/// opening the stock screen. Return on the keyboard takes the typed ticker
-/// as is, for when search is down.
+/// model, same rows as Search, crypto left out) in a sheet, returning the
+/// ticker instead of opening the stock screen. Return on the keyboard takes
+/// the typed ticker as is, for when search is down.
 struct AnalysisSymbolSearchSheet: View {
     let services: AppServices
     let onPick: (String) -> Void
@@ -70,7 +70,9 @@ struct AnalysisSymbolSearchSheet: View {
                     .buttonStyle(.dsSecondary)
             }
             .frame(maxHeight: .infinity, alignment: .top)
-        } else if let results = model.results {
+        } else if let found = model.results {
+            // Crypto has no sector or market split to explain against.
+            let results = AnalysisFormat.analyzableResults(found)
             if results.isEmpty {
                 EmptyState(title: "No matching symbols", subtitle: "Press return to use \(text.uppercased()) anyway")
                     .frame(maxHeight: .infinity, alignment: .top)

@@ -15,7 +15,9 @@ struct AnalysisDetailRequest: Identifiable, Hashable {
 final class AnalysisModel {
     static let pollInterval: Duration = .seconds(3)
 
-    /// Changes whenever the moves must be fetched again.
+    /// Changes whenever the moves must be fetched again. Holds the canonical
+    /// symbol, so adopting the server's spelling (`BRK.B` → `BRK-B`) does not
+    /// fetch again.
     struct LoadKey: Hashable {
         let symbol: String?
         let range: AnalysisRange
@@ -50,28 +52,41 @@ final class AnalysisModel {
     private(set) var quickPicks: [String] = []
     /// The account the "Today" section is for; nil when none is linked.
     private(set) var accountId: String?
+    /// The Alpaca account whose keys the server reads news with, sent as
+    /// `brokerage_id` on every explain; nil for any other kind of account.
+    private(set) var newsAccountId: String?
     /// nil when there is no stock account to ask about.
     private(set) var portfolio: Loadable<PortfolioMoves>?
 
     @ObservationIgnored private let repository: () -> AnalysisRepository
     @ObservationIgnored private let holdings: (String) async throws -> [String]
     @ObservationIgnored private let sleep: PollingSleep
+    /// Replaces `repository().moves` when set (tests that finish requests
+    /// out of order).
+    @ObservationIgnored private let fetchMoves: ((String, AnalysisRange) async throws -> MoveAnalysis)?
     /// Bumped on every symbol or range change; answers for an older one are dropped.
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var accountGeneration = 0
+    /// Every moves request is numbered; an answer older than the last one
+    /// applied is dropped (a poll in flight can land after an explain's or a
+    /// pull-to-refresh's newer answer and would stop polling early).
+    @ObservationIgnored private var requestSeq = 0
+    @ObservationIgnored private var appliedSeq = 0
 
     init(
         symbol: String? = nil,
         range: AnalysisRange = .threeMonths,
         repository: @escaping () -> AnalysisRepository,
         holdings: @escaping (String) async throws -> [String] = { _ in [] },
-        sleep: @escaping PollingSleep = realPollingSleep
+        sleep: @escaping PollingSleep = realPollingSleep,
+        fetchMoves: ((String, AnalysisRange) async throws -> MoveAnalysis)? = nil
     ) {
         self.symbol = Self.normalize(symbol)
         self.range = range
         self.repository = repository
         self.holdings = holdings
         self.sleep = sleep
+        self.fetchMoves = fetchMoves
     }
 
     /// Trimmed and upper-cased; blank is nil.
@@ -83,8 +98,20 @@ final class AnalysisModel {
     // MARK: Derived
 
     var analysis: MoveAnalysis? { moves.value }
-    var loadKey: LoadKey { LoadKey(symbol: symbol, range: range) }
-    var pollKey: PollKey { PollKey(symbol: symbol, range: range, polling: isPolling) }
+    var loadKey: LoadKey { LoadKey(symbol: symbol.map(AnalysisFormat.canonical), range: range) }
+    var pollKey: PollKey { PollKey(symbol: symbol.map(AnalysisFormat.canonical), range: range, polling: isPolling) }
+
+    /// `candidate` is the symbol on screen, however it is spelled.
+    func isCurrent(_ candidate: String) -> Bool {
+        guard let symbol else { return false }
+        return AnalysisFormat.canonical(candidate) == AnalysisFormat.canonical(symbol)
+    }
+
+    /// The symbol on screen is not one of the quick picks, so it gets its
+    /// own chip.
+    var showsSymbolChip: Bool {
+        symbol != nil && !quickPicks.contains(where: isCurrent)
+    }
     var isPolling: Bool { (analysis?.pending ?? 0) > 0 }
     var modelConfigured: Bool { analysis?.modelConfigured ?? false }
     var chips: [AnalysisFilterChip] { analysis.map(AnalysisFormat.chips) ?? [] }
@@ -95,8 +122,16 @@ final class AnalysisModel {
         return AnalysisFormat.markers(bars: analysis.bars, events: visibleEvents)
     }
 
+    /// The server predates AI analysis (a bare 404, detail `Not Found`).
+    var isServerUnsupported: Bool { AnalysisFormat.isMissingRoute(moves.error) }
+
     /// The server could not find the symbol, or it has no price history.
-    var isNotFound: Bool { (moves.error as? ApiError)?.statusCode == 404 }
+    var isNotFound: Bool {
+        (moves.error as? ApiError)?.statusCode == 404 && !isServerUnsupported
+    }
+
+    /// The "Today" call hit a server without AI analysis.
+    var isPortfolioUnsupported: Bool { AnalysisFormat.isMissingRoute(portfolio?.error) }
 
     /// "Explain moves" applies: a model is chosen and something is left.
     var canExplainAll: Bool {
@@ -120,9 +155,10 @@ final class AnalysisModel {
 
     // MARK: Symbol, range, filter, selection
 
-    /// Shows `symbol`. The view's `.task(id: loadKey)` fetches it.
+    /// Shows `symbol`. The view's `.task(id: loadKey)` fetches it. The same
+    /// symbol spelled differently (`BRK.B` for `BRK-B`) changes nothing.
     func select(symbol raw: String) {
-        guard let next = Self.normalize(raw), next != symbol else { return }
+        guard let next = Self.normalize(raw), !isCurrent(next) else { return }
         symbol = next
         resetForNewSeries()
     }
@@ -174,17 +210,26 @@ final class AnalysisModel {
     // MARK: Loading and polling
 
     /// Fetches the current symbol and range. A failure shows only when
-    /// nothing is on screen; an answer for an older symbol or range is dropped.
+    /// nothing is on screen. An answer for an older symbol or range, or one
+    /// older than the last answer applied, is dropped.
     func load() async {
         guard let symbol else { return }
         let started = generation
         let r = range
+        requestSeq += 1
+        let seq = requestSeq
         do {
-            let value = try await repository().moves(symbol: symbol, range: r)
-            guard started == generation else { return }
+            let value: MoveAnalysis
+            if let fetchMoves {
+                value = try await fetchMoves(symbol, r)
+            } else {
+                value = try await repository().moves(symbol: symbol, range: r)
+            }
+            guard started == generation, seq > appliedSeq else { return }
+            appliedSeq = seq
             apply(value)
         } catch {
-            guard started == generation, !error.isCancellationOrTaskCancelled else { return }
+            guard started == generation, seq > appliedSeq, !error.isCancellationOrTaskCancelled else { return }
             if moves.value == nil { moves = .failed(error) }
         }
     }
@@ -197,6 +242,13 @@ final class AnalysisModel {
 
     private func apply(_ value: MoveAnalysis) {
         moves = .loaded(value)
+        // The server's spelling of the same symbol wins (`BRK.B` comes back
+        // as `BRK-B`). The load key is canonical, so this does not fetch
+        // again. A different symbol is never adopted: the screen stays on
+        // what was asked for.
+        if let adopted = Self.normalize(value.symbol), adopted != symbol, isCurrent(adopted) {
+            symbol = adopted
+        }
         if !AnalysisFormat.chips(value).contains(where: { $0.filter == filter }) {
             filter = .all
         }
@@ -240,14 +292,18 @@ final class AnalysisModel {
             explainingIds.subtract(ids)
         }
         do {
-            let queued = try await repository().explain(symbol: symbol, range: range, dates: dates, force: force)
+            let queued = try await repository().explain(
+                symbol: symbol, range: range, dates: dates, force: force, brokerageId: newsAccountId
+            )
             guard started == generation else { return }
             if queued == 0 { toast = Toast("Nothing to explain") }
             // Picks up the pending rows; the view's poll task takes over.
             await load()
         } catch {
             guard started == generation, !error.isCancellation else { return }
-            actionError = (error as? ApiError)?.message ?? error.localizedDescription
+            actionError = AnalysisFormat.isMissingRoute(error)
+                ? AnalysisFormat.missingRouteMessage
+                : (error as? ApiError)?.message ?? error.localizedDescription
         }
     }
 
@@ -256,12 +312,14 @@ final class AnalysisModel {
     /// The dashboard's selected account: its holdings become the quick
     /// picks (the first one is shown when no symbol is chosen yet), and its
     /// last session fills "Today in your account". `isStockAccount` false
-    /// (Kalshi) skips the portfolio call.
-    func loadAccount(_ id: String?, isStockAccount: Bool) async {
+    /// (Kalshi) skips the portfolio call. An Alpaca account (`isAlpaca`)
+    /// also becomes the `brokerage_id` explain requests read news with.
+    func loadAccount(_ id: String?, isStockAccount: Bool, isAlpaca: Bool = false) async {
         accountGeneration += 1
         let started = accountGeneration
         let changed = id != accountId
         accountId = id
+        newsAccountId = isAlpaca ? id : nil
         guard let id else {
             quickPicks = []
             portfolio = nil
@@ -299,11 +357,18 @@ final class AnalysisModel {
         }
     }
 
-    /// Equity tickers only (no options), first-seen order, no repeats.
+    /// Stock and ETF tickers only (no options, no crypto pairs such as
+    /// `BTCUSD` or `BTC/USD`), first-seen order, no repeats however they
+    /// are spelled.
     func setQuickPicks(_ symbols: [String]) {
         var seen = Set<String>()
         quickPicks = symbols.compactMap { raw -> String? in
-            guard let s = Self.normalize(raw), !isOccOptionSymbol(s), TradeTicket.isTradableSymbol(s), seen.insert(s).inserted else { return nil }
+            guard let s = Self.normalize(raw),
+                  !isOccOptionSymbol(s),
+                  !AnalysisFormat.isCryptoSymbol(s),
+                  TradeTicket.isTradableSymbol(s),
+                  seen.insert(AnalysisFormat.canonical(s)).inserted
+            else { return nil }
             return s
         }
         if symbol == nil, let first = quickPicks.first {

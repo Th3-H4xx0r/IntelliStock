@@ -48,9 +48,15 @@ private struct AnalysisContent: View {
         account.map { $0.brokerageType.lowercased() != "kalshi" } ?? false
     }
 
+    /// Alpaca accounts lend their keys for news on explain requests.
+    private var isAlpacaAccount: Bool {
+        account?.brokerageType.lowercased() == "alpaca"
+    }
+
     private struct AccountKey: Hashable {
         let id: String?
         let stock: Bool
+        let alpaca: Bool
     }
 
     private var currentYear: Int {
@@ -86,8 +92,8 @@ private struct AnalysisContent: View {
         .task {
             if services.dashboard.brokeragesValue == nil { await services.dashboard.loadBrokerages() }
         }
-        .task(id: AccountKey(id: account?.id, stock: isStockAccount)) {
-            await model.loadAccount(account?.id, isStockAccount: isStockAccount)
+        .task(id: AccountKey(id: account?.id, stock: isStockAccount, alpaca: isAlpacaAccount)) {
+            await model.loadAccount(account?.id, isStockAccount: isStockAccount, isAlpaca: isAlpacaAccount)
         }
         .sheet(item: $model.detail) { request in
             AnalysisEventSheet(model: model, eventId: request.id, onOpenSettings: openSettings)
@@ -115,11 +121,11 @@ private struct AnalysisContent: View {
                         .foregroundStyle(DS.Text.secondary)
                 }
                 .accessibilityLabel("Search symbols")
-                if let symbol = model.symbol, !model.quickPicks.contains(symbol) {
+                if let symbol = model.symbol, model.showsSymbolChip {
                     AnalysisChip(label: symbol, selected: true) {}
                 }
                 ForEach(model.quickPicks, id: \.self) { s in
-                    AnalysisChip(label: s, selected: s == model.symbol) { model.select(symbol: s) }
+                    AnalysisChip(label: s, selected: model.isCurrent(s)) { model.select(symbol: s) }
                 }
             }
             .padding(.horizontal, DS.pageGutter)
@@ -287,9 +293,18 @@ private struct AnalysisContent: View {
         .accessibilityLabel("Loading")
     }
 
+    /// An older server (no AI analysis), an unknown symbol, or any other
+    /// failure; a 400 is the request itself, so it gets no Retry.
     @ViewBuilder
     private func failure(symbol: String, error: any Error) -> some View {
-        if model.isNotFound {
+        if model.isServerUnsupported {
+            Card(padding: 0) {
+                EmptyState(
+                    title: AnalysisFormat.missingRouteMessage,
+                    subtitle: "Update IntelliStock on the server to use it"
+                )
+            }
+        } else if model.isNotFound {
             Card(padding: 0) {
                 EmptyState(
                     title: "No price history for \(symbol)",
@@ -299,9 +314,10 @@ private struct AnalysisContent: View {
                 )
             }
         } else {
-            ErrorRow(message: (error as? ApiError)?.message ?? error.localizedDescription) {
-                Task { await model.retry() }
-            }
+            ErrorRow(
+                message: (error as? ApiError)?.message ?? error.localizedDescription,
+                onRetry: AnalysisFormat.isRetryable(error) ? { Task { await model.retry() } } : nil
+            )
         }
     }
 
@@ -390,7 +406,11 @@ private struct AnalysisContent: View {
                     case nil, .loading?:
                         DashboardPlaceholderRows(count: 3)
                     case .failed(let error)?:
-                        portfolioError(error)
+                        if model.isPortfolioUnsupported {
+                            emptyRow(AnalysisFormat.missingRouteMessage)
+                        } else {
+                            portfolioError(error)
+                        }
                     case .loaded(let p)?:
                         if p.holdings.isEmpty {
                             emptyRow("No stock positions in \(DashboardFormat.accountName(account))")
@@ -401,7 +421,7 @@ private struct AnalysisContent: View {
                                     model.select(symbol: h.symbol)
                                     withAnimation(DSMotion.standard) { proxy.scrollTo(Self.topId, anchor: .top) }
                                 } label: {
-                                    AnalysisHoldingRow(holding: h, selected: h.symbol == model.symbol)
+                                    AnalysisHoldingRow(holding: h, selected: model.isCurrent(h.symbol))
                                 }
                                 .buttonStyle(.plain)
                                 .accessibilityHint("Shows \(h.symbol) above")
@@ -415,13 +435,13 @@ private struct AnalysisContent: View {
         }
     }
 
-    /// `Alpaca Live · Nov 13 · SPY -0.70%`.
+    /// `Alpaca Live · Nov 13 · S&P 500 -0.70%`.
     private var portfolioSubtitle: String? {
         guard let account else { return nil }
         var parts = [DashboardFormat.accountName(account)]
         if let p = model.portfolio?.value {
             if let asOf = p.asOf { parts.append(AnalysisFormat.dayLabel(asOf, currentYear: currentYear)) }
-            if let spy = p.spyPct { parts.append("SPY \(fmtPct(spy))") }
+            if let spy = p.spyPct { parts.append("S&P 500 \(fmtPct(spy))") }
         }
         return parts.joined(separator: " · ")
     }
@@ -433,8 +453,10 @@ private struct AnalysisContent: View {
                 .foregroundStyle(DS.Palette.loss)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("Retry") { Task { await model.reloadPortfolio() } }
-                .buttonStyle(.dsSecondary)
+            if AnalysisFormat.isRetryable(error) {
+                Button("Retry") { Task { await model.reloadPortfolio() } }
+                    .buttonStyle(.dsSecondary)
+            }
         }
     }
 
@@ -450,7 +472,7 @@ private struct AnalysisContent: View {
 }
 
 /// The account's whole move: the contribution total, split three ways,
-/// against SPY.
+/// against the S&P 500.
 private struct AnalysisTotalsRow: View {
     let totals: PortfolioMoveTotals?
     let spyPct: Double?
@@ -472,7 +494,7 @@ private struct AnalysisTotalsRow: View {
                     .font(DS.Font.bodyMedium)
                     .foregroundStyle(dashboardChangeColor(totals?.contributionPct))
                 if let spyPct {
-                    Text("SPY \(fmtPct(spyPct))")
+                    Text("S&P 500 \(fmtPct(spyPct))")
                         .font(DS.Font.caption)
                         .foregroundStyle(DS.Text.muted)
                 }

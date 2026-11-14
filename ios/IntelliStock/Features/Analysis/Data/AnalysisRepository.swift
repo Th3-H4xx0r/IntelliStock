@@ -26,12 +26,15 @@ nonisolated struct AnalysisRepository: Sendable {
     }
 
     /// `POST /analysis/moves/explain`. `dates` nil means every unexplained
-    /// or failed event in the range. Returns how many were queued; a 400
-    /// (with a readable message) when no model is chosen.
-    func explain(symbol: String, range: AnalysisRange, dates: [String]?, force: Bool) async throws -> Int {
+    /// or failed event in the range. `brokerageId` (an Alpaca account) is
+    /// whose keys the server reads news with; left out when nil. Returns how
+    /// many were queued; a 400 (with a readable message) when no model is
+    /// chosen.
+    func explain(symbol: String, range: AnalysisRange, dates: [String]?, force: Bool, brokerageId: String? = nil) async throws -> Int {
         var pairs: [(String, JSON)] = [("symbol", .string(symbol)), ("range", .string(range.rawValue))]
         if let dates { pairs.append(("dates", .array(dates.map(JSON.string)))) }
         pairs.append(("force", .bool(force)))
+        if let brokerageId, !brokerageId.isEmpty { pairs.append(("brokerage_id", .string(brokerageId))) }
         let data = try await client.post("/analysis/moves/explain", body: .object(JSONObject(pairs)))
         return data["queued"].intOr(0)
     }

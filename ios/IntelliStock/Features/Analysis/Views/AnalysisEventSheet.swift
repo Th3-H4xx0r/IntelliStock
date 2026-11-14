@@ -76,7 +76,7 @@ struct AnalysisEventSheet: View {
             VStack(alignment: .leading, spacing: 12) {
                 sectionTitle("The move, split")
                 AnalysisSplitGrid(move: event.retPct, market: event.marketPct, sector: event.sectorPct, specific: event.specificPct)
-                Text("Market is the part SPY explains at this stock's beta; sector is what its sector ETF added beyond the market; the rest is the stock's own.")
+                Text("Market is the part the S&P 500 (SPY) explains at this stock's beta; sector is what its sector ETF added beyond the market; the rest is the stock's own.")
                     .font(DS.Font.caption)
                     .foregroundStyle(DS.Text.muted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -251,7 +251,7 @@ struct AnalysisEventSheet: View {
                                     .controlSize(.small)
                                     .tint(DS.Palette.onAccent)
                             }
-                            Text(busy ? "Explaining…" : (event.isExplained ? "Re-run" : "Explain"))
+                            Text(busy ? "Explaining…" : AnalysisFormat.explainButtonTitle(event))
                         }
                     }
                     .buttonStyle(.dsPrimary(size: .large, fullWidth: true))

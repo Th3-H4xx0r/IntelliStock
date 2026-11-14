@@ -9,12 +9,20 @@ import UIKit
 @Suite(.serialized, .enabled(if: SnapshotConfig.isEnabled))
 @MainActor
 struct SnapshotScreensAnalysis {
-    static func services(modelConfigured: Bool = true, pending: Bool = false) -> (services: AppServices, stub: DataStub) {
+    static func services(modelConfigured: Bool = true, pending: Bool = false, oldServer: Bool = false) -> (services: AppServices, stub: DataStub) {
         let env = Snapshot.makeServices()
         env.stub.handler = {
-            SnapshotFixtures.analysisOverride($0, modelConfigured: modelConfigured, pending: pending) ?? SnapshotFixtures.respond($0)
+            SnapshotFixtures.analysisOverride($0, modelConfigured: modelConfigured, pending: pending, oldServer: oldServer)
+                ?? SnapshotFixtures.respond($0)
         }
         return env
+    }
+
+    /// A server without AI analysis: the screen and Today say so.
+    @Test func analysisOldServer() async throws {
+        try await Snapshot.capture("analysis-old-server", environment: Self.services(oldServer: true), pages: 2, settle: .seconds(4)) { services in
+            SnapshotHost.shell(services, tab: .more, stack: [.analysis(nil)])
+        }
     }
 
     /// From More: the first holding (GLD) picked, the chart, the moves and

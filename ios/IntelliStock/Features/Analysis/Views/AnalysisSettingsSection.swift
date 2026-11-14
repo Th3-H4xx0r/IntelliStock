@@ -26,10 +26,13 @@ struct AnalysisSettingsSection: View {
                     icon: "psychology",
                     tile: "text.magnifyingglass",
                     title: "AI analysis settings",
-                    subtitle: model.isUnsupported ? "This server has no AI analysis yet" : settingsErrorText(error)
+                    subtitle: model.isUnsupported ? AnalysisFormat.missingRouteMessage : settingsErrorText(error)
                 ) {
-                    Button("Retry") { Task { await model.retry() } }
-                        .buttonStyle(.dsSecondary)
+                    // Retrying an older server or a bad request changes nothing.
+                    if !model.isUnsupported, AnalysisFormat.isRetryable(error) {
+                        Button("Retry") { Task { await model.retry() } }
+                            .buttonStyle(.dsSecondary)
+                    }
                 }
             case .loaded(let s):
                 modelRow(s)

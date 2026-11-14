@@ -185,13 +185,84 @@ nonisolated enum AnalysisFormat {
         return parts.joined(separator: " · ")
     }
 
-    /// `Technology · XLK · beta 1.62`, from what the server knows.
+    /// `Technology · XLK · beta 1.62`, from what the server knows. No beta
+    /// when the server had too little history to estimate one.
     static func profileLine(_ a: MoveAnalysis) -> String {
         var parts: [String] = []
-        if let sector = a.sector { parts.append(sector.prefix(1).uppercased() + sector.dropFirst()) }
+        if let sector = a.sector {
+            let label = sectorLabel(sector)
+            if !label.isEmpty { parts.append(label) }
+        }
         if let etf = a.sectorEtf { parts.append(etf) }
         if let beta = a.beta { parts.append("beta \(dartToStringAsFixed(beta, 2))") }
         return parts.joined(separator: " · ")
+    }
+
+    /// A sector key as words: `financial_services` → `Financial services`,
+    /// `nasdaq_100` → `Nasdaq 100`.
+    static func sectorLabel(_ key: String) -> String {
+        let words = key.replacingOccurrences(of: "_", with: " ").trimmingCharacters(in: .whitespaces)
+        guard let first = words.first else { return "" }
+        return first.uppercased() + words.dropFirst()
+    }
+
+    // MARK: Symbols
+
+    /// A symbol the server would treat as the same: upper-cased, with `.`
+    /// and `/` spelled `-` (the server answers `BRK.B` as `BRK-B`).
+    static func canonical(_ symbol: String) -> String {
+        symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            .replacingOccurrences(of: ".", with: "-")
+            .replacingOccurrences(of: "/", with: "-")
+    }
+
+    private static let cryptoQuotes = ["USDT", "USDC", "USD"]
+
+    /// A crypto pair, which has no sector to split against: `BTC/USD`,
+    /// Yahoo's `BTC-USD`, or Alpaca's `BTCUSD` (letters only, ending in a
+    /// dollar quote, longer than any US stock ticker's five letters).
+    static func isCryptoSymbol(_ raw: String) -> Bool {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if s.contains("/") { return true }
+        for quote in cryptoQuotes {
+            if s.hasSuffix("-\(quote)") { return true }
+            if s.count >= 6, s.hasSuffix(quote), s.allSatisfy({ $0.isASCII && $0.isLetter }) { return true }
+        }
+        return false
+    }
+
+    /// Search results the analysis can use: no crypto.
+    static func analyzableResults(_ results: [SearchInstrument]) -> [SearchInstrument] {
+        results.filter { $0.type.lowercased() != "crypto" && !isCryptoSymbol($0.symbol) }
+    }
+
+    // MARK: Errors
+
+    /// A server that predates these routes: FastAPI's bare 404, detail
+    /// exactly `Not Found`. The real unknown-symbol 404 names the symbol.
+    static func isMissingRoute(_ error: (any Error)?) -> Bool {
+        guard let api = error as? ApiError else { return false }
+        return api.statusCode == 404 && api.message == "Not Found"
+    }
+
+    /// The copy for `isMissingRoute`.
+    static let missingRouteMessage = "This server has no AI analysis yet"
+
+    /// Worth a Retry: not a 400 (the request itself is wrong) and not a
+    /// server without the feature.
+    static func isRetryable(_ error: (any Error)?) -> Bool {
+        if isMissingRoute(error) { return false }
+        return (error as? ApiError)?.statusCode != 400
+    }
+
+    /// The detail sheet's action: Re-run an explained day, Try again after
+    /// a failure, else Explain.
+    static func explainButtonTitle(_ e: MoveEvent) -> String {
+        switch e.status {
+        case .explained: "Re-run"
+        case .failed: "Try again"
+        case .unexplained, .pending: "Explain"
+        }
     }
 
     /// The range's move: last close against the first.

@@ -27,10 +27,15 @@ nonisolated extension SnapshotFixtures {
     }
 
     /// Routes a screen's own stub answers first: no model chosen
-    /// (`modelConfigured: false`), or explanations still running (`pending`).
-    static func analysisOverride(_ request: URLRequest, modelConfigured: Bool = true, pending: Bool = false) -> (status: Int, body: String)? {
+    /// (`modelConfigured: false`), explanations still running (`pending`),
+    /// or a server that predates the feature (`oldServer`: FastAPI's bare
+    /// 404 on every `/analysis` route).
+    static func analysisOverride(_ request: URLRequest, modelConfigured: Bool = true, pending: Bool = false, oldServer: Bool = false) -> (status: Int, body: String)? {
         let parts = request.path.split(separator: "/").map(String.init)
         let query = request.queryItems
+        if oldServer, parts.first == "analysis" {
+            return (404, #"{"detail":"Not Found"}"#)
+        }
         if parts == ["analysis", "moves"] {
             let symbol = (query["symbol"] ?? "NVDA").uppercased()
             // The shared route answers the unknown ticker's 404.
@@ -237,7 +242,8 @@ nonisolated extension SnapshotFixtures {
 
         return [
             "symbol": symbol, "range": range,
-            "sector": symbol == "GLD" ? "commodities" : "technology",
+            // A real underscore key, so the label shows as words.
+            "sector": symbol == "GLD" ? "precious_metals" : "technology",
             "sector_etf": symbol == "GLD" ? NSNull() : "XLK",
             "beta": symbol == "GLD" ? 0.12 : 1.62,
             "model_configured": modelConfigured,

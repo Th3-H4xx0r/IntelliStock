@@ -493,6 +493,9 @@ struct AnalysisSettingsModelTests {
         await m.load()
         m.setSigma(3.0)
         m.setSigma(3.5)
+        // Wait until the second tap's save is actually waiting on the clock;
+        // advancing before it has started to sleep would never wake it.
+        #expect(await eventually { clock.requested.count == 2 && clock.pendingCount == 1 })
         await clock.advance(by: .milliseconds(300))
         #expect(puts(stub).isEmpty)
         await clock.advance(by: AnalysisSettingsModel.saveDelay)
@@ -547,6 +550,12 @@ struct AnalysisRepositoryWireTests {
         #expect(queued == 4)
         #expect(stub.last?.method == "POST" && stub.last?.path == "/analysis/moves/explain")
         #expect(stub.last?.jsonBody == ["symbol": "NVDA", "range": "1M", "force": false])
+
+        // An Alpaca account's id rides along for news; blank is left out.
+        _ = try await repo.explain(symbol: "NVDA", range: .threeMonths, dates: ["2026-10-02"], force: true, brokerageId: "acct-alpaca")
+        #expect(stub.last?.jsonBody == ["symbol": "NVDA", "range": "3M", "dates": ["2026-10-02"], "force": true, "brokerage_id": "acct-alpaca"])
+        _ = try await repo.explain(symbol: "NVDA", range: .threeMonths, dates: nil, force: false, brokerageId: "")
+        #expect(stub.last?.jsonBody["brokerage_id"] == JSON.null)
 
         stub.respond(json: AnalysisFixtures.portfolio)
         _ = try await repo.portfolio(brokerageId: "acct-1")
@@ -630,5 +639,242 @@ struct AnalysisFormatTests {
         #expect(AnalysisMoveChart.index(at: 100, width: width, count: 1, markers: []) == 0)
         // A tap in the label column picks the last session.
         #expect(AnalysisMoveChart.index(at: 250, width: width, count: 11, markers: []) == 10)
+    }
+}
+
+// MARK: - Fixes from the review against the real backend
+
+@MainActor
+struct AnalysisBackendReviewTests {
+    private func model(_ stub: DataStub, symbol: String? = "NVDA") -> AnalysisModel {
+        AnalysisModel(symbol: symbol, repository: { AnalysisRepository(client: stub.client) })
+    }
+
+    nonisolated private static func movesRequests(_ stub: DataStub?) -> Int {
+        stub?.requests.filter { $0.method == "GET" && $0.path == "/analysis/moves" }.count ?? 0
+    }
+
+    // MARK: 1 and 7. Sector keys, missing beta
+
+    @Test func sectorKeysReadAsWordsAndAMissingBetaIsLeftOut() throws {
+        #expect(AnalysisFormat.sectorLabel("financial_services") == "Financial services")
+        #expect(AnalysisFormat.sectorLabel("nasdaq_100") == "Nasdaq 100")
+        #expect(AnalysisFormat.sectorLabel("small_caps") == "Small caps")
+        #expect(AnalysisFormat.sectorLabel("technology") == "Technology")
+        #expect(AnalysisFormat.sectorLabel("") == "")
+
+        let qqq = MoveAnalysis(json: try AnalysisFixtures.json(#"{"symbol": "TQQQ", "range": "3M", "sector": "nasdaq_100", "sector_etf": "QQQ", "beta": null, "model_configured": true, "pending": 0, "bars": [], "events": [], "categories": []}"#))
+        #expect(AnalysisFormat.profileLine(qqq) == "Nasdaq 100 · QQQ")
+        let bank = MoveAnalysis(json: try AnalysisFixtures.json(#"{"symbol": "JPM", "range": "3M", "sector": "financial_services", "sector_etf": "XLF", "beta": 1.08, "model_configured": true, "pending": 0, "bars": [], "events": [], "categories": []}"#))
+        #expect(AnalysisFormat.profileLine(bank) == "Financial services · XLF · beta 1.08")
+    }
+
+    // MARK: 2. Old server
+
+    @Test func aBareNotFoundMeansTheServerHasNoAnalysisYet() async {
+        let stub = DataStub(status: 404, json: #"{"detail": "Not Found"}"#)
+        let m = model(stub)
+        await m.load()
+        #expect(m.isServerUnsupported)
+        #expect(!m.isNotFound)
+        #expect(!AnalysisFormat.isRetryable(m.moves.error))
+
+        await m.loadAccount("acct-1", isStockAccount: true)
+        #expect(m.isPortfolioUnsupported)
+    }
+
+    @Test func theBackendsUnknownSymbol404IsNotFound() async {
+        let stub = DataStub(status: 404, json: #"{"detail": "No price history for ZZZZ."}"#)
+        let m = model(stub, symbol: "ZZZZ")
+        await m.load()
+        #expect(m.isNotFound)
+        #expect(!m.isServerUnsupported)
+        await m.loadAccount("acct-1", isStockAccount: true)
+        #expect(!m.isPortfolioUnsupported)
+    }
+
+    @Test func explainOnAnOldServerSaysSo() async {
+        let stub = DataStub()
+        stub.handler = { req in
+            req.method == "POST" ? (404, #"{"detail": "Not Found"}"#) : (200, AnalysisFixtures.moves(events: AnalysisModelTests.sixEvents))
+        }
+        let m = model(stub)
+        await m.load()
+        await m.explainAll()
+        #expect(m.actionError == "This server has no AI analysis yet")
+    }
+
+    // MARK: 3. Stale responses
+
+    /// Holds the first moves request open until the test answers it.
+    private final class HeldRequest {
+        var continuation: CheckedContinuation<MoveAnalysis, any Error>?
+    }
+
+    @Test func anOlderAnswerNeverReplacesANewerOne() async throws {
+        // The first request (a poll) is held and would say nothing is
+        // pending; the second (after an explain) says two are, and lands
+        // first. URL stubs answer in order, so the requests are finished by
+        // hand here.
+        let idle = MoveAnalysis(json: try AnalysisFixtures.json(AnalysisFixtures.moves(pending: 0, events: AnalysisModelTests.sixEvents)))
+        let busy = MoveAnalysis(json: try AnalysisFixtures.json(AnalysisFixtures.moves(pending: 2, events: AnalysisModelTests.sixEvents)))
+        let held = HeldRequest()
+        var calls = 0
+        let m = AnalysisModel(
+            symbol: "NVDA",
+            repository: { AnalysisRepository(client: DataStub().client) },
+            fetchMoves: { _, _ in
+                calls += 1
+                if calls == 1 {
+                    return try await withCheckedThrowingContinuation { held.continuation = $0 }
+                }
+                return busy
+            }
+        )
+
+        let older = Task { await m.load() }
+        #expect(await eventually { held.continuation != nil })
+        await m.load()
+        #expect(m.analysis?.pending == 2)
+
+        held.continuation?.resume(returning: idle)
+        await older.value
+        #expect(calls == 2)
+        // The late, older answer was dropped: still polling.
+        #expect(m.analysis?.pending == 2)
+        #expect(m.isPolling)
+    }
+
+    // MARK: 4. Symbols
+
+    @Test func theServersSpellingIsAdoptedWithoutAnotherFetch() async {
+        let stub = DataStub(json: AnalysisFixtures.moves(symbol: "BRK-B", events: []))
+        let m = model(stub, symbol: "brk.b")
+        let key = m.loadKey
+        await m.load()
+        #expect(stub.last?.queryItems["symbol"] == "BRK.B")
+        #expect(m.symbol == "BRK-B")
+        // Canonical either way, so the view does not fetch again.
+        #expect(m.loadKey == key)
+
+        // The same symbol, spelled the dashboard's way, changes nothing.
+        m.select(symbol: "BRK.B")
+        #expect(m.analysis != nil)
+        #expect(Self.movesRequests(stub) == 1)
+
+        // One chip for it, and the holding row highlights.
+        m.setQuickPicks(["BRK.B", "AAPL", "BRK-B"])
+        #expect(m.quickPicks == ["BRK.B", "AAPL"])
+        #expect(!m.showsSymbolChip)
+        #expect(m.isCurrent("BRK.B") && m.isCurrent("BRK-B"))
+        #expect(!m.isCurrent("AAPL"))
+    }
+
+    @Test func aDifferentSymbolIsNeverAdopted() async {
+        let stub = DataStub(json: AnalysisFixtures.moves(symbol: "NVDA", events: []))
+        let m = model(stub, symbol: "AAPL")
+        await m.load()
+        #expect(m.symbol == "AAPL")
+        #expect(AnalysisFormat.canonical("brk/b") == "BRK-B")
+    }
+
+    @Test func aSymbolNotInTheHoldingsGetsItsOwnChip() async {
+        let stub = DataStub(json: AnalysisFixtures.moves(symbol: "NVDA", events: []))
+        let m = model(stub)
+        m.setQuickPicks(["AAPL"])
+        #expect(m.showsSymbolChip)
+        #expect(AnalysisFormat.canonical(" brk.b ") == "BRK-B")
+    }
+
+    // MARK: 5. Crypto
+
+    @Test func cryptoIsNeverAQuickPickOrTheDefault() {
+        let m = model(DataStub(), symbol: nil)
+        m.setQuickPicks(["BTCUSD", "BTC/USD", "eth-usd", "DOGEUSDT", "GLD", "AAPL"])
+        #expect(m.quickPicks == ["GLD", "AAPL"])
+        #expect(m.symbol == "GLD")
+    }
+
+    @Test func cryptoSymbolsAndSearchResults() {
+        for crypto in ["BTCUSD", "btc/usd", "ETH-USD", "SOLUSDC", "DOGEUSDT"] {
+            #expect(AnalysisFormat.isCryptoSymbol(crypto), "\(crypto)")
+        }
+        // Stock tickers top out at five letters, so none of these is a pair.
+        for stock in ["AAPL", "BRK.B", "BRK-B", "TQQQ", "GLD", "BIL", "ABUSD"] {
+            #expect(!AnalysisFormat.isCryptoSymbol(stock), "\(stock)")
+        }
+        let results = [
+            SearchInstrument(symbol: "BTC-USD", name: "Bitcoin USD", type: "Crypto"),
+            SearchInstrument(symbol: "AAPL", name: "Apple Inc.", type: "Stock"),
+            SearchInstrument(symbol: "QQQ", name: "Invesco QQQ Trust", type: "ETF"),
+            SearchInstrument(symbol: "XRPUSD", name: "XRP", type: "Stock"),
+        ]
+        #expect(AnalysisFormat.analyzableResults(results).map(\.symbol) == ["AAPL", "QQQ"])
+    }
+
+    @Test func aBadRequestOffersNoRetry() {
+        #expect(!AnalysisFormat.isRetryable(ApiError(message: "range must be one of 1M, 3M, 6M, 1Y", statusCode: 400)))
+        #expect(AnalysisFormat.isRetryable(ApiError(message: "boom", statusCode: 500)))
+        #expect(AnalysisFormat.isRetryable(ApiError(message: "No price history for ZZZZ.", statusCode: 404)))
+        #expect(!AnalysisFormat.isRetryable(ApiError(message: "Not Found", statusCode: 404)))
+        #expect(AnalysisFormat.isRetryable(URLError(.timedOut)))
+    }
+
+    // MARK: 6. brokerage_id
+
+    @Test func explainSendsTheAlpacaAccountForNews() async throws {
+        let stub = DataStub()
+        stub.handler = { req in
+            if req.method == "POST" { return (200, #"{"queued": 1}"#) }
+            if req.path == "/analysis/portfolio" { return (200, AnalysisFixtures.portfolio) }
+            return (200, AnalysisFixtures.moves(events: AnalysisModelTests.sixEvents))
+        }
+        let m = model(stub)
+        await m.loadAccount("acct-alpaca", isStockAccount: true, isAlpaca: true)
+        #expect(m.newsAccountId == "acct-alpaca")
+        await m.load()
+        await m.explainAll()
+        let first = try #require(stub.requests.last { $0.method == "POST" })
+        #expect(first.jsonBody == ["symbol": "NVDA", "range": "3M", "force": false, "brokerage_id": "acct-alpaca"])
+
+        // A per-event Explain carries it too.
+        let failed = try #require(m.event(id: "NVDA|2026-10-04"))
+        await m.explain(failed)
+        let second = try #require(stub.requests.last { $0.method == "POST" })
+        #expect(second.jsonBody["brokerage_id"] == "acct-alpaca")
+
+        // Any other kind of account sends none.
+        await m.loadAccount("acct-other", isStockAccount: true, isAlpaca: false)
+        #expect(m.newsAccountId == nil)
+        await m.explainAll()
+        let third = try #require(stub.requests.last { $0.method == "POST" })
+        #expect(third.jsonBody == ["symbol": "NVDA", "range": "3M", "force": false])
+    }
+
+    // MARK: 8 and 9. Families and wording
+
+    @Test func familiesMatchTheWebGrouping() {
+        let groups: [AnalysisCategoryFamily: [String]] = [
+            .company: ["earnings", "guidance", "deal_product", "management", "capital_insider"],
+            .street: ["analyst", "sector_peer"],
+            .macro: ["macro", "regulatory_legal"],
+            .market: ["market"],
+            .noCatalyst: ["no_catalyst"],
+        ]
+        for (family, keys) in groups {
+            for key in keys { #expect(AnalysisCategoryFamily(category: key) == family, "\(key)") }
+        }
+    }
+
+    @Test func aFailedEventsButtonSaysTryAgain() throws {
+        func event(_ status: String) throws -> MoveEvent {
+            MoveEvent(json: try AnalysisFixtures.json(AnalysisFixtures.event("2026-10-02", status: status, category: "analyst", label: "Analysts")))
+        }
+        #expect(AnalysisFormat.explainButtonTitle(try event("failed")) == "Try again")
+        #expect(AnalysisFormat.explainButtonTitle(try event("explained")) == "Re-run")
+        #expect(AnalysisFormat.explainButtonTitle(try event("unexplained")) == "Explain")
+        // Failed is a red outline; unexplained and pending are hollow grey.
+        #expect(AnalysisMarkerStyle(try event("failed")) == .failed)
+        #expect(AnalysisMarkerStyle(try event("pending")) == .hollow)
     }
 }
