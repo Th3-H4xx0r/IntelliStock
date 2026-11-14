@@ -35,11 +35,12 @@ nonisolated enum SnapshotFixtures {
         }
 
         // Feature areas add their own routes in their own files
-        // (SnapshotFixtures+Ops / +Markets / +Shell), tried first, so
+        // (SnapshotFixtures+Ops / +Markets / +Shell / +Analysis), tried first, so
         // several people can extend the stubs without editing this file.
         if let hit = opsResponse(parts: parts, query: query, now: now)
             ?? marketsResponse(parts: parts, query: query, now: now)
-            ?? shellResponse(parts: parts, query: query, now: now) {
+            ?? shellResponse(parts: parts, query: query, now: now)
+            ?? analysisResponse(parts: parts, query: query, now: now) {
             return hit
         }
 

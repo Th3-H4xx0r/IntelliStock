@@ -68,7 +68,7 @@ final class TourTests: XCTestCase {
         settle(1)
         shot("20-tab-More")
         let more = ["Crypto", "Backtests", "Brokerages", "Agent runs", "Nexus graph",
-                    "Learning", "Models", "Token usage", "Settings"]
+                    "Learning", "AI analysis", "Models", "Token usage", "Settings"]
         for (n, row) in more.enumerated() {
             tapTab("More")
             guard tapRow(row) else { continue }
