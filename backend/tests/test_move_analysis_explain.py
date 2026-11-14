@@ -56,6 +56,45 @@ def test_invented_article_numbers_are_dropped():
     assert only_invented["category"] == "no_catalyst"
 
 
+def test_a_no_catalyst_answer_keeps_none_of_the_models_words():
+    out = ex.finalize({"category": "no_catalyst", "confidence": "high",
+                       "explanation": "Shares fell after the FDA rejected its drug."},
+                      ARTICLES)
+    assert out["category"] == "no_catalyst" and out["confidence"] == "low"
+    assert "FDA" not in out["explanation"] and out["sources"] == []
+    no_headline = ex.finalize(_answer(headline="", explanation="Because of a recall."),
+                              ARTICLES)
+    assert no_headline["category"] == "no_catalyst"
+    assert "recall" not in no_headline["explanation"]
+
+
+def test_custom_endpoints_reach_the_keys_the_llm_layer_reads(monkeypatch):
+    import secret_store
+    monkeypatch.setattr(secret_store, "decrypt_required", lambda v, field: v)
+    openai = ex.resolve_model({"provider": "openai", "model": "m", "api_key": "k",
+                               "openai_base_url": "http://lm:1234/v1"})
+    assert openai["provider_config"].get("base_url") == "http://lm:1234/v1"
+    assert "openai_base_url" not in openai["provider_config"]
+    router = ex.resolve_model({"provider": "openrouter", "model": "m", "api_key": "k",
+                               "openrouter_base_url": "https://or.example/v1"})
+    assert router["provider_config"].get("openrouter_base_url") == "https://or.example/v1"
+    assert "base_url" not in router["provider_config"]
+    cli = ex.resolve_model({"provider": "claude-cli", "model": "claude-haiku-5-5",
+                            "cli_path": "/usr/local/bin/claude", "name": "Haiku"})
+    assert cli["api_key"] == "" and cli["provider_config"]["cli_path"] == "/usr/local/bin/claude"
+    assert cli["name"] == "Haiku"
+    with pytest.raises(ex.ExplainError):
+        ex.resolve_model({"provider": "", "model": ""})
+
+
+def test_a_release_just_after_the_close_is_outside_that_days_window():
+    start, end = nw.news_window("2026-10-01", "2026-10-02")
+    after_close = datetime(2026, 10, 2, 20, 5, tzinfo=timezone.utc)   # 16:05 EDT
+    assert not (start <= after_close <= end)
+    next_start, _ = nw.news_window("2026-10-02", "2026-10-05")
+    assert next_start == end and next_start <= after_close
+
+
 def test_unknown_category_and_confidence_are_coerced():
     out = ex.finalize(_answer(category="aliens", confidence="certain"), ARTICLES)
     assert out["category"] == "no_catalyst"
@@ -115,7 +154,7 @@ def test_category_list_covers_every_category_with_a_label():
 def test_window_runs_from_the_previous_close_to_this_close():
     start, end = nw.news_window("2026-10-01", "2026-10-02")
     assert start == datetime(2026, 10, 1, 20, 0, tzinfo=timezone.utc)   # 16:00 EDT
-    assert end == datetime(2026, 10, 2, 20, 15, tzinfo=timezone.utc)    # 16:15 EDT
+    assert end == datetime(2026, 10, 2, 20, 0, tzinfo=timezone.utc)     # 16:00 EDT
 
 
 def test_articles_outside_the_window_are_dropped():

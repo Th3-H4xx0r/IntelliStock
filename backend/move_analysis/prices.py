@@ -87,6 +87,8 @@ def fetch_daily(symbol: str, start: date, *, provider: Optional[Callable] = None
         rows = rows[:-1]
     if provider is None:
         with _CACHE_LOCK:
+            for old in [k for k, v in _CACHE.items() if stamp - v[0] >= _CACHE_TTL_SEC]:
+                del _CACHE[old]
             _CACHE[key] = (stamp, list(rows))
     return rows
 

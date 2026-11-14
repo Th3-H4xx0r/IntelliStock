@@ -91,7 +91,7 @@ def test_short_history_uses_beta_one_and_no_sector_part():
     bars = dc.decompose(dates, p, p, m, m)
     assert bars[0].ret_pct is None and bars[0].flagged is False
     for bar in bars[1:]:
-        assert bar.beta == 1.0
+        assert bar.beta is None   # not estimated; the split used 1.0
         assert bar.sector_pct == 0.0
         assert math.isclose(bar.market_pct + bar.specific_pct, bar.ret_pct, abs_tol=1e-9)
     assert bars[-1].flagged  # +6.8% clears 2 x min_move_pct on its own

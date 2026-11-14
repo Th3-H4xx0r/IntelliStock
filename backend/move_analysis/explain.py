@@ -115,16 +115,18 @@ def finalize(raw: dict, articles: list) -> dict:
         confidence = "low"
 
     if category == "no_catalyst" or not cited or not headline:
-        claimed = category != "no_catalyst"
+        # Fixed wording only: whatever the model wrote here has no article
+        # behind it, so none of it is kept.
+        claimed = category != "no_catalyst" and not cited
         return {
             "category": "no_catalyst",
             "headline": NO_CATALYST_HEADLINE,
             "explanation": (
                 "The model named a cause but cited no article for it, so it was "
-                "not kept." if claimed and not cited else
-                explanation or "None of the articles published before the close "
-                               "explains the stock-specific part of this move."),
-            "confidence": "low" if claimed else confidence,
+                "not kept." if claimed else
+                "None of the articles published before the close explains the "
+                "stock-specific part of this move."),
+            "confidence": "low",
             "sources": [],
         }
     return {
@@ -190,6 +192,17 @@ def resolve_model(doc: dict) -> dict:
         raise ExplainError("the chosen model has no provider or model id")
 
     config = dict(_provider_config_from_doc(provider, doc))
+    # llm_utils reads a custom endpoint as base_url for openai and nvidia and
+    # as openrouter_base_url for openrouter; the helper above names them
+    # differently, which would send the key to the provider's default host.
+    config.pop("openai_base_url", None)
+    config.pop("nvidia_base_url", None)
+    custom = {"openai": doc.get("openai_base_url"),
+              "nvidia": doc.get("nvidia_base_url"),
+              "openrouter": doc.get("openrouter_base_url")}.get(provider)
+    custom = str(custom or "").strip()
+    if custom:
+        config["openrouter_base_url" if provider == "openrouter" else "base_url"] = custom
     api_key = ""
     if provider in ("claude-cli", "codex-cli"):
         cli_path = str(doc.get("cli_path") or "").strip()
@@ -206,8 +219,6 @@ def resolve_model(doc: dict) -> dict:
         api_key = stored or resolve_api_key_for_provider(provider)
         if not api_key and provider != "ollama":
             raise ExplainError("the chosen model has no API key")
-        if provider == "openrouter" and doc.get("openrouter_base_url"):
-            config["base_url"] = str(doc["openrouter_base_url"]).strip()
     effort = str(doc.get("reasoning_effort") or "").strip()
     if effort:
         config.setdefault("reasoning_effort", effort)

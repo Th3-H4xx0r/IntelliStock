@@ -309,12 +309,60 @@ def test_portfolio_parts_sum_to_each_contribution(store):
         assert h["contribution_pct"] == pytest.approx(
             h["ret_pct"] * h["weight_pct"] / 100, abs=1e-3)
     nvda = out["holdings"][0]
-    assert nvda["weight_pct"] == pytest.approx(60.0, abs=0.6)
+    # 6000 of 10600: the option and the unpriced holding count toward the total.
+    assert nvda["weight_pct"] == pytest.approx(56.6, abs=0.1)
     assert nvda["flagged"] and nvda["event"]["id"] == f"NVDA|{LAST}"
     tqqq = next(h for h in out["holdings"] if h["symbol"] == "TQQQ")
     assert tqqq["event"] is None or tqqq["flagged"]
     assert out["totals"]["contribution_pct"] == pytest.approx(
         sum(h["contribution_pct"] for h in out["holdings"]), abs=1e-3)
+
+
+def test_an_option_counts_toward_the_account_total_but_is_not_listed(store):
+    positions = [{"symbol": "NVDA", "marketValue": 5000.0},
+                 {"symbol": "NVDA261218C00200000", "marketValue": 5000.0}]
+    out = svc.portfolio_payload(store, positions, 0.0, **_inject())
+    assert [h["symbol"] for h in out["holdings"]] == ["NVDA"]
+    assert out["holdings"][0]["weight_pct"] == pytest.approx(50.0)
+
+
+def test_a_long_batch_is_not_read_as_abandoned_and_is_not_run_twice(store, monkeypatch):
+    svc.put_settings(store, {"model_id": "m1"})
+    jumps = {"NVDA": {JUMP_DAY: 0.09, "2026-11-03": -0.08, "2026-10-20": 0.10}}
+    clock = {"now": datetime(2026, 11, 14, 17, 0, tzinfo=timezone.utc)}
+    monkeypatch.setattr(svc, "_now", lambda now=None: now or clock["now"])
+    calls = []
+
+    def _factory(doc):
+        def _call(prompt, system):
+            calls.append(prompt)
+            clock["now"] += timedelta(minutes=6)   # each explanation is slow
+            mid = svc.moves_payload(store, "NVDA", "3M", price_provider=_provider(jumps=jumps),
+                                    sector_lookup=lambda s: "technology", now=NOW)
+            assert not [e for e in mid["events"] if e["status"] == "failed"]
+            return {"category": "analyst", "headline": "h", "explanation": "e",
+                    "confidence": "low", "cited": [1]}
+        return _call
+
+    arts = [{"title": "t", "summary": "", "url": "", "source": "s",
+             "published_at": "2026-11-10T13:00:00Z"}]
+    out = svc.queue_explain(store, "NVDA", "3M", None, False, spawn=lambda fn: fn(),
+                            articles_fn=lambda s, p, d: arts, llm_factory=_factory,
+                            price_provider=_provider(jumps=jumps),
+                            sector_lookup=lambda s: "technology")
+    assert out["queued"] >= 3 and len(calls) == out["queued"]
+
+
+def test_a_requeued_event_is_not_explained_by_the_older_batch(store):
+    svc.put_settings(store, {"model_id": "m1"})
+    held = []
+    _queue(store, dates=[JUMP_DAY], spawn=held.append)           # batch A, not yet run
+    store.update("MoveEvents", f"NVDA|{JUMP_DAY}", {"batch": "someone-else"})
+    before = store.get("MoveEvents", f"NVDA|{JUMP_DAY}")
+    held[0]()                                                     # batch A runs late
+    after = store.get("MoveEvents", f"NVDA|{JUMP_DAY}")
+    assert after["status"] == "pending" and after["batch"] == "someone-else"
+    assert before["pending_since"] == after["pending_since"]
 
 
 def test_portfolio_with_no_positions_is_empty(store):

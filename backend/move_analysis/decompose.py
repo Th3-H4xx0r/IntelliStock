@@ -25,6 +25,7 @@ class Bar:
     market_pct: Optional[float]
     sector_pct: Optional[float]
     specific_pct: Optional[float]
+    #: None when there was too little history to estimate it (1.0 was used).
     beta: Optional[float]
     flagged: bool
     #: True when the day is flagged but under half the move is stock-specific.
@@ -124,6 +125,7 @@ def decompose(
         lo = max(1, i - lookback)
         idx = [j for j in range(lo, i) if r[j] is not None and m[j] is not None]
         beta = 1.0
+        estimated = False
         gamma = 0.0
         beta_s = None
         sd_specific = None
@@ -132,6 +134,7 @@ def decompose(
             fitted = _slope([r[j] for j in idx], [m[j] for j in idx])
             if fitted is not None:
                 beta = fitted
+                estimated = True
             sidx = [j for j in idx if s[j] is not None]
             if s[i] is not None and len(sidx) >= min_obs:
                 beta_s = _slope([s[j] for j in sidx], [m[j] for j in sidx])
@@ -161,7 +164,8 @@ def decompose(
         market_driven = flagged and abs(specific) < 0.5 * abs(r[i])
 
         bars.append(Bar(dates[i], float(closes[i]), vol, _pct(r[i]), _pct(market),
-                        _pct(sector), _pct(specific), beta, flagged, market_driven))
+                        _pct(sector), _pct(specific), beta if estimated else None,
+                        flagged, market_driven))
     return bars
 
 

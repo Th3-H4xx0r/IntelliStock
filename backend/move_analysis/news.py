@@ -19,11 +19,12 @@ SUMMARY_CHARS = 500
 
 def news_window(prev_date: Optional[str], day: str) -> tuple:
     """``(start, end)`` in UTC: previous session's 16:00 close to this
-    session's 16:15, New York time."""
+    session's 16:00 close, New York time. Anything published after the close
+    (an earnings release at 16:05) belongs to the next session's move."""
     this_day = date.fromisoformat(day)
     prev_day = date.fromisoformat(prev_date) if prev_date else this_day - timedelta(days=3)
     start = datetime.combine(prev_day, dtime(16, 0), tzinfo=NY)
-    end = datetime.combine(this_day, dtime(16, 15), tzinfo=NY)
+    end = datetime.combine(this_day, dtime(16, 0), tzinfo=NY)
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
 
@@ -60,7 +61,8 @@ def _http_url(value) -> str:
 
 def alpaca_credentials(store, brokerage_id: Optional[str] = None) -> Optional[tuple]:
     """Market-data keys from a linked Alpaca account: the named one, else a
-    paper account, else any. None when there is none."""
+    live account. Other paper accounts are never borrowed, because some are
+    reserved for a single instance. None when there is none."""
     from stock_credential_boundary import resolve_alpaca_brokerage_credentials
 
     try:
@@ -68,9 +70,9 @@ def alpaca_credentials(store, brokerage_id: Optional[str] = None) -> Optional[tu
                 if str((row or {}).get("brokerage_type") or "").strip().lower() == "alpaca"]
     except Exception:
         return None
-    rows.sort(key=lambda row: (str(row.get("id")) != str(brokerage_id or ""),
-                               row.get("alpaca_paper") is not True))
-    for row in rows:
+    named = [row for row in rows if str(row.get("id")) == str(brokerage_id or "")]
+    live = [row for row in rows if row.get("alpaca_paper") is False and row not in named]
+    for row in named + live:
         try:
             creds = resolve_alpaca_brokerage_credentials(
                 row, expected_brokerage_id=str(row.get("id")))
@@ -91,8 +93,12 @@ def fetch_alpaca(symbol: str, start: datetime, end: datetime, key: str,
         ALPACA_NEWS_URL,
         headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret,
                  "accept": "application/json"},
-        params={"symbols": symbol, "start": _iso(start), "end": _iso(end),
-                "limit": 50, "sort": "desc", "include_content": "false"},
+        # Oldest first: when a busy day exceeds the page, what is cut is the
+        # late recap of the move, not the overnight news that caused it.
+        # Alpaca writes share classes with a dot (BRK.B).
+        params={"symbols": symbol.replace("-", "."), "start": _iso(start),
+                "end": _iso(end), "limit": 50, "sort": "asc",
+                "include_content": "false"},
         timeout=20,
     )
     response.raise_for_status()
@@ -123,7 +129,9 @@ def fetch_google(symbol: str, start: datetime, end: datetime) -> list:
     raw = fetch_google_news(
         keywords=[f"{symbol} stock"],
         start_date=start.replace(tzinfo=None),
-        end_date=end.replace(tzinfo=None),
+        # Google's "before:" excludes the date it names, so ask through the
+        # next day; the stamp check below still enforces the real window.
+        end_date=(end + timedelta(days=1)).replace(tzinfo=None),
         max_results_per_keyword=20,
         max_total=20,
     )

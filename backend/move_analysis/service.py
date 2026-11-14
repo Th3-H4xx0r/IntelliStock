@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
@@ -28,6 +29,15 @@ SIGMA_BOUNDS = (1.0, 6.0)
 MIN_MOVE_BOUNDS = (0.5, 25.0)
 PENDING_STALE = timedelta(minutes=10)
 MAX_QUEUE = 40
+
+_ENSURED = False
+_ENSURE_LOCK = threading.Lock()
+#: Serialises the check-then-mark-pending step, so a double click cannot
+#: queue the same event twice.
+_QUEUE_LOCK = threading.Lock()
+#: One batch explains at a time, so several requests cannot each run their
+#: own model processes side by side in the API container.
+_RUN_LOCK = threading.Lock()
 
 _SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9]{0,5}(-[A-Z]{1,2})?$")
 
@@ -62,6 +72,23 @@ def normalize_range(raw) -> str:
     return key
 
 
+def ensure_tables(store) -> None:
+    """Create the two tables once per process on the real store. Registering
+    a table in db.schema does not create it; nothing on deploy does either."""
+    global _ENSURED
+    if _ENSURED:
+        return
+    from db import store as real_store
+    if store is not real_store:
+        return
+    with _ENSURE_LOCK:
+        if _ENSURED:
+            return
+        from db import schema
+        schema.ensure_schema(tables=[EVENTS_TABLE, SETTINGS_TABLE])
+        _ENSURED = True
+
+
 # ── Settings ─────────────────────────────────────────────────────────────────
 
 
@@ -78,6 +105,7 @@ def _models(store) -> list:
 
 
 def _stored_settings(store) -> dict:
+    ensure_tables(store)
     try:
         row = store.get(SETTINGS_TABLE, SETTINGS_ID) or {}
     except Exception:
@@ -134,7 +162,9 @@ def put_settings(store, patch: dict) -> dict:
                 raise ValueError(f"{field} must be between {bounds[0]:g} and {bounds[1]:g}")
             doc[field] = number
     doc["updated_at"] = _iso(_now())
-    store.insert(SETTINGS_TABLE, doc, conflict="replace")
+    result = store.insert(SETTINGS_TABLE, doc, conflict="replace")
+    if getattr(result, "errors", 0):
+        raise RuntimeError("the settings could not be saved")
     return get_settings(store)
 
 
@@ -286,39 +316,78 @@ def queue_explain(store, symbol_raw, range_raw, dates=None, force: bool = False,
             return {"queued": 0}
     computed = compute(symbol, range_key, settings, now=now, **inject)
     stamp = _now(now)
+    batch = uuid.uuid4().hex
     jobs = []
-    for bar in reversed(computed["bars"]):
-        if not bar.flagged or (wanted is not None and bar.date not in wanted):
-            continue
-        row = store.get(EVENTS_TABLE, event_id(symbol, bar.date)) or {}
-        status = row.get("status")
-        if status == "pending" and not _is_stale_pending(row, stamp):
-            continue
-        if not force and (status == "explained" or (bar.market_driven and not status)):
-            continue
-        event = _blank_event(symbol, bar, computed["sector_etf"])
-        jobs.append({"event": event, "prev_date": computed["prev_date"].get(bar.date)})
-        if len(jobs) >= MAX_QUEUE:
-            break
-    for job in jobs:
-        store.insert(EVENTS_TABLE, {
-            "id": job["event"]["id"], "symbol": symbol, "date": job["event"]["date"],
-            "status": "pending", "pending_since": _iso(stamp),
-        }, conflict="replace")
+    with _QUEUE_LOCK:
+        for bar in reversed(computed["bars"]):
+            if not bar.flagged or (wanted is not None and bar.date not in wanted):
+                continue
+            row = store.get(EVENTS_TABLE, event_id(symbol, bar.date)) or {}
+            status = row.get("status")
+            if status == "pending" and not _is_stale_pending(row, stamp):
+                continue
+            if not force and (status == "explained" or (bar.market_driven and not status)):
+                continue
+            event = _blank_event(symbol, bar, computed["sector_etf"])
+            jobs.append({"event": event, "prev_date": computed["prev_date"].get(bar.date)})
+            if len(jobs) >= MAX_QUEUE:
+                break
+        for job in jobs:
+            store.insert(EVENTS_TABLE, {
+                "id": job["event"]["id"], "symbol": symbol, "date": job["event"]["date"],
+                "status": "pending", "pending_since": _iso(stamp), "batch": batch,
+            }, conflict="replace")
     if jobs:
         credentials = None
         if articles_fn is None:
             credentials = nw.alpaca_credentials(store, brokerage_id)
-        spawn(lambda: run_jobs(store, jobs, model_doc, credentials=credentials,
-                               articles_fn=articles_fn, llm_factory=llm_factory))
+        spawn(lambda: run_jobs(store, jobs, model_doc, batch=batch,
+                               credentials=credentials, articles_fn=articles_fn,
+                               llm_factory=llm_factory))
     return {"queued": len(jobs)}
 
 
-def run_jobs(store, jobs: list, model_doc: dict, *, credentials=None,
-             articles_fn: Optional[Callable] = None,
+def _still_ours(store, job: dict, batch: Optional[str]) -> bool:
+    """True while the event is still pending for this batch. A newer request
+    that re-queued it owns it instead."""
+    if batch is None:
+        return True
+    try:
+        row = store.get(EVENTS_TABLE, job["event"]["id"]) or {}
+    except Exception:
+        return False
+    return row.get("status") == "pending" and row.get("batch") == batch
+
+
+def _keep_alive(store, jobs: list, batch: Optional[str]) -> None:
+    """Refresh pending_since on the jobs still waiting, so a long batch is
+    not read as abandoned while the worker is alive."""
+    stamp = _iso(_now())
+    for job in jobs:
+        if not _still_ours(store, job, batch):
+            continue
+        try:
+            store.update(EVENTS_TABLE, job["event"]["id"], {"pending_since": stamp})
+        except Exception:
+            pass
+
+
+def run_jobs(store, jobs: list, model_doc: dict, *, batch: Optional[str] = None,
+             credentials=None, articles_fn: Optional[Callable] = None,
              llm_factory: Optional[Callable] = None) -> None:
     """Explain each queued event and store the outcome. Never raises: every
-    job ends as an explained or a failed row."""
+    job ends as an explained or a failed row. Batches run one at a time."""
+    while not _RUN_LOCK.acquire(timeout=120):
+        _keep_alive(store, jobs, batch)
+    try:
+        _run_batch(store, jobs, model_doc, batch=batch, credentials=credentials,
+                   articles_fn=articles_fn, llm_factory=llm_factory)
+    finally:
+        _RUN_LOCK.release()
+
+
+def _run_batch(store, jobs: list, model_doc: dict, *, batch, credentials,
+               articles_fn, llm_factory) -> None:
     model_name = str(model_doc.get("name") or model_doc.get("model") or "")
     llm_call = None
     setup_error = None
@@ -327,7 +396,10 @@ def run_jobs(store, jobs: list, model_doc: dict, *, credentials=None,
     except Exception as exc:
         setup_error = str(exc)[:200] or type(exc).__name__
 
-    for job in jobs:
+    for position, job in enumerate(jobs):
+        _keep_alive(store, jobs[position:], batch)
+        if not _still_ours(store, job, batch):
+            continue
         event = job["event"]
         base = {"id": event["id"], "symbol": event["symbol"], "date": event["date"],
                 "model_id": str(model_doc.get("id")), "model_name": model_name,
@@ -366,11 +438,21 @@ def portfolio_payload(store, positions: list, cash=None, *,
              "totals": {"contribution_pct": 0.0, "market_pct": 0.0,
                         "sector_pct": 0.0, "specific_pct": 0.0}}
     held = []
+    # The account total counts every position, including the options and
+    # crypto this view leaves out, so a stock's weight is its share of the
+    # whole account.
+    total = 0.0
     for position in positions or []:
         try:
-            symbol = normalize_symbol((position or {}).get("symbol"))
             value = float((position or {}).get("marketValue") or 0.0)
         except (TypeError, ValueError):
+            continue
+        if value != value:
+            continue
+        total += value
+        try:
+            symbol = normalize_symbol((position or {}).get("symbol"))
+        except ValueError:
             continue
         if value:
             held.append((symbol, value))
@@ -378,7 +460,8 @@ def portfolio_payload(store, positions: list, cash=None, *,
         cash_value = float(cash) if cash is not None else 0.0
     except (TypeError, ValueError):
         cash_value = 0.0
-    total = sum(value for _, value in held) + max(cash_value, 0.0)
+    if cash_value == cash_value:
+        total += cash_value
     if not held or total <= 0:
         return empty
 

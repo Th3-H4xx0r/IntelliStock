@@ -59,7 +59,8 @@ def sector_for(symbol: str, *, lookup: Optional[Callable] = None) -> tuple:
         sector = ""
     etf = SECTOR_ETFS.get(sector)
     result = (sector, etf) if etf and etf != symbol else (None, None)
-    if lookup is None:
+    # "unknown" is also what a failed lookup returns, so it is not cached.
+    if lookup is None and sector and sector != "unknown":
         with _LOCK:
             _CACHE[symbol] = result
     return result
