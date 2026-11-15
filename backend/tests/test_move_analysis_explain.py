@@ -407,3 +407,48 @@ def test_a_failed_later_page_keeps_the_first_and_an_ampersand_is_escaped(monkeyp
                         lambda **kw: seen.update(kw) or [])
     nw.fetch_google("AT&T stock", start, end)
     assert seen["keywords"] == ["AT%26T stock"]
+
+
+def test_date_only_articles_cannot_carry_the_companys_after_close_results(monkeypatch):
+    import strategies.google_news as gn
+    midnight_pacific = datetime(2026, 10, 28, 7, 0, tzinfo=timezone.utc)
+    timed = datetime(2026, 10, 28, 15, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(gn, "fetch_google_news", lambda **kw: [
+        {"title": "NOW stock declines double digits after hours on earnings miss",
+         "published_date": midnight_pacific, "url": "https://e.com/1"},
+        {"title": "ServiceNow reports Q3 2026 in line but stock drops 17%",
+         "published_date": midnight_pacific, "url": "https://e.com/2"},
+        {"title": "ServiceNow leads a software rally", "published_date": midnight_pacific,
+         "url": "https://e.com/3"},
+        {"title": "ServiceNow slips ahead of earnings", "published_date": timed,
+         "url": "https://e.com/4"},
+    ])
+    got = nw.articles_for("NOW", "2026-10-27", "2026-10-28", name="ServiceNow")
+    company = [a for a in got if a["scope"] == "company"]
+    assert [a["title"] for a in company] == ["ServiceNow leads a software rally",
+                                             "ServiceNow slips ahead of earnings"]
+    assert company[0]["time_unknown"] is True and "time_unknown" not in company[1]
+    assert not any("after hours" in a["title"] or "Q3" in a["title"] for a in got)
+    assert "| time of day unknown |" in ex.build_prompt(EVENT, got)
+    assert "time of day unknown" in ex.SYSTEM_PROMPT
+
+
+def test_a_peers_results_after_the_close_are_left_for_the_next_session():
+    def _alpaca(symbols, start, end, key, secret):
+        if "," not in symbols:
+            return []
+        return [
+            {"title": "Microsoft Q4 earnings highlights: cloud revenue up 27%", "summary": "",
+             "url": "", "source": "B", "published_at": "2026-07-29T20:22:00Z", "_breadth": 1},
+            {"title": "Stock Market Today: software rallies as chips fall", "summary": "",
+             "url": "", "source": "B", "published_at": "2026-07-29T21:10:00Z", "_breadth": 30},
+            {"title": "Microsoft likely to report higher Q4 earnings", "summary": "",
+             "url": "", "source": "B", "published_at": "2026-07-29T11:54:00Z", "_breadth": 1},
+        ]
+
+    got = nw.articles_for("NOW", "2026-07-28", "2026-07-29", credentials=("k", "s"),
+                          name="ServiceNow", peers=("MSFT",), etf="IGV", group="software",
+                          alpaca=_alpaca, google=lambda *a: [])
+    assert [a["title"] for a in got] == [
+        "Stock Market Today: software rallies as chips fall",
+        "Microsoft likely to report higher Q4 earnings"]
