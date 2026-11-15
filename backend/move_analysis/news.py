@@ -17,6 +17,7 @@ from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 NY = ZoneInfo("America/New_York")
+PACIFIC = ZoneInfo("America/Los_Angeles")
 ALPACA_NEWS_URL = "https://data.alpaca.markets/v1beta1/news"
 MAX_ARTICLES = 25
 MAX_CONTEXT = 20
@@ -170,6 +171,7 @@ def fetch_google(query: str, start: datetime, end: datetime) -> list:
         title = _clean(item.get("title") or item.get("headline"), 300)
         if stamp is None or not title or not (start <= stamp <= end):
             continue
+        local = stamp.astimezone(PACIFIC)
         out.append({
             "title": title,
             "summary": _clean(item.get("description"), SUMMARY_CHARS),
@@ -177,6 +179,9 @@ def fetch_google(query: str, start: datetime, end: datetime) -> list:
             "source": _clean(item.get("source") or "Google News", 60),
             "published_at": _iso(stamp),
             "_breadth": 50,
+            # Google stamps many articles with the date only, as midnight
+            # Pacific; such an article may have come out after the close.
+            "_time_unknown": (local.hour, local.minute, local.second) == (0, 0, 0),
         })
     return out
 
@@ -190,6 +195,11 @@ _MOVE_WORDS = ("falls", "fall ", "drops", "plunge", "slides", "sinks", "tumble",
 _EVENT_WORDS = ("earnings", "results", "guidance", "forecast", "outlook",
                 "launch", "unveil", "beats", "misses", "upgrade", "downgrade",
                 "acquire", "acquisition")
+#: In a headline whose time of day is unknown, these point to a report that
+#: most often comes out after the close.
+_RESULTS_WORDS = ("earnings", "results", "guidance", "quarter", " q1", " q2", " q3",
+                  " q4", "after hours", "after-hours", "after the bell",
+                  "extended trading")
 _NOISE_WORDS = ("price target", "maintains", "reiterates", "initiates coverage",
                 "investigation", "class action", "shareholder alert", "deadline")
 
@@ -245,10 +255,18 @@ def _unique(found: list, seen: set) -> list:
     return out
 
 
+def _has(title: str, words: tuple) -> bool:
+    text = f" {title.lower()} "
+    return any(word in text for word in words)
+
+
 def _public(article: dict, scope: str, after_close: bool = False,
             previous_evening: bool = False) -> dict:
     row = {k: v for k, v in article.items() if not k.startswith("_")}
     row["scope"] = scope
+    if article.get("_time_unknown"):
+        row["time_unknown"] = True
+        after_close = previous_evening = False
     if after_close:
         row["after_close"] = True
     if previous_evening:
@@ -276,6 +294,11 @@ def articles_for(symbol: str, prev_date: Optional[str], day: str, *,
     # Unquoted: Google's dated search returns almost nothing for a quoted name.
     company += _safe(google, f"{name or symbol} stock", start, end)
     company = _unique(company, seen)
+    # The company's own results usually come after the close. An article
+    # about them with no time of day cannot be placed before it, so it is
+    # left out; the timed feed carries results released before the open.
+    company = [a for a in company
+               if not (a.get("_time_unknown") and _has(a["title"], _RESULTS_WORDS))]
     company.sort(key=lambda a: (a.get("_breadth", 99), a["published_at"]))
     company = company[:MAX_ARTICLES]
 
@@ -292,9 +315,16 @@ def articles_for(symbol: str, prev_date: Optional[str], day: str, *,
     evening_iso = _iso(start + timedelta(hours=RECAP_HOURS))
     # A write-up about the company itself from after the close may carry
     # results or a deal announced after it, so it is left out.
+    # After the close only recaps of the session are wanted: a peer's results
+    # or a launch stamped after it belongs to the next session.
     context = [a for a in context
-               if not (a["published_at"] > end_iso
-                       and _about_company(a["title"], symbol, name))]
+               if a.get("_time_unknown") or not (
+                   a["published_at"] > end_iso
+                   and (_about_company(a["title"], symbol, name)
+                        or _has(a["title"], _EVENT_WORDS + _RESULTS_WORDS)))]
+    context = [a for a in context
+               if not (a.get("_time_unknown") and _about_company(a["title"], symbol, name)
+                       and _has(a["title"], _RESULTS_WORDS))]
     scored = [(_context_score(a["title"], symbol, name, group, tuple(peers)), a)
               for a in context]
     # 2 and up: a bare mention of a peer or the industry is not enough.

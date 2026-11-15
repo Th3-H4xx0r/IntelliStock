@@ -67,7 +67,10 @@ SYSTEM_PROMPT = (
     "cannot explain it. Articles marked 'previous evening' count only for "
     "what was released after the previous close, such as a peer's results; "
     "their account of the previous session's trading explains nothing "
-    "about this one.\n"
+    "about this one. Articles marked 'time of day unknown' carry only a "
+    "date and may have been written after the close: if one reports "
+    "results, an after-hours move or anything else that could have come "
+    "after 16:00, do not treat it as the cause of this session.\n"
     "4. It must point the right way. Bad news does not explain a rise, nor "
     "good news a fall, unless an article itself reports that reaction.\n"
     "5. On the first session after the company reports results, the "
@@ -162,7 +165,8 @@ def build_prompt(event: dict, articles: list, context: Optional[dict] = None) ->
         lines.append(title)
         for article in rows:
             number += 1
-            mark = (" | after close" if article.get("after_close")
+            mark = (" | time of day unknown" if article.get("time_unknown")
+                    else " | after close" if article.get("after_close")
                     else " | previous evening" if article.get("previous_evening") else "")
             lines.append(f"[{number}] {article['published_at']}{mark} | "
                          f"{article['source']} | {article['title']}")
