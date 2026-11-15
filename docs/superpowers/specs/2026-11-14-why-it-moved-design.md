@@ -195,3 +195,26 @@ Chart marker shapes, exact layout, polling interval (2 to 5 seconds), copy.
 - `service.py` and endpoints against `FakeStore`: settings validation,
   queueing, stale-pending recovery, portfolio parts sum to the contribution.
 - Web build passes; iOS unit tests for decoding and the view model.
+
+
+## Revision 2 (2026-11-14): accuracy
+
+A check of all 45 flagged ServiceNow days over six months found 11 labels
+correct, 5 partly right, 13 wrong and 16 missed. The causes, and what changed:
+
+- **Wrong yardstick.** A software stock was split against XLK, which is
+  mostly chips. Stocks in a mapped industry (`sectors.INDUSTRY_ETFS`) are now
+  split against that industry's fund (software: IGV).
+- **Only company news reached the model.** It now also gets what the main
+  market groups and the stock's peers (the fund's largest holdings) did that
+  day, and up to 20 peer, industry and market articles. Those may run four
+  hours past the close, marked "after close", because that is when recaps are
+  written; company articles still stop at the close.
+- **Weak items named as causes.** The prompt now asks first whether the stock
+  moved alone or with its peers, and rules out routine press releases, law-firm
+  notices and single price-target changes as causes of large moves, stale
+  news, and causes that point the wrong way.
+- **Market and industry days** are sent to the model too, to name what moved
+  the group; with no cited cause they keep the label built from the split.
+- Stored explanations carry `version`; older ones read as not explained, and
+  each row keeps the titles the model was shown (`considered`).

@@ -126,3 +126,28 @@ def load_aligned(symbol: str, sector_etf: Optional[str], *, days: int,
         sector=None if sector is None else [sector.get(d) for d in dates],
         volumes=[row["volume"] for row in own],
     )
+
+
+def day_moves(symbols, start: date, *, provider: Optional[Callable] = None,
+              now: Optional[datetime] = None) -> dict:
+    """``{symbol: {date: close-to-close % move}}`` from adjusted closes. A
+    symbol whose prices cannot be loaded is simply absent."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    wanted = list(dict.fromkeys(s for s in symbols if s))
+
+    def _one(symbol: str):
+        try:
+            rows = fetch_daily(symbol, start, provider=provider, now=now)
+        except Exception:
+            return symbol, {}
+        moves = {}
+        for before, after in zip(rows, rows[1:]):
+            if before["adj"] > 0:
+                moves[after["date"]] = (after["adj"] / before["adj"] - 1.0) * 100.0
+        return symbol, moves
+
+    if not wanted:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(6, len(wanted))) as pool:
+        return {symbol: moves for symbol, moves in pool.map(_one, wanted) if moves}
