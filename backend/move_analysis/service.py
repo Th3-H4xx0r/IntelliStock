@@ -487,8 +487,13 @@ def _run_batch(store, jobs: list, model_doc: dict, *, batch, credentials,
                                    for a in articles],
                        **fields)
         except Exception as exc:
-            row = dict(base, status="failed", failed_at=_iso(_now()),
-                       error=(str(exc)[:200] or type(exc).__name__))
+            if event.get("market_driven"):
+                # The split already says why; a model failure must not hide it.
+                row = dict(base, status="explained", explained_at=_iso(_now()),
+                           error=None, **ex.market_explanation(event))
+            else:
+                row = dict(base, status="failed", failed_at=_iso(_now()),
+                           error=(str(exc)[:200] or type(exc).__name__))
         try:
             store.insert(EVENTS_TABLE, row, conflict="replace")
         except Exception:

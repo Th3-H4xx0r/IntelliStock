@@ -5,10 +5,13 @@ Company articles must be stamped between the previous close and that day's
 close, so a release that came out after the move cannot be handed to the
 model as its cause. Peer and market articles may run a few hours past the
 close, because that is when the day's recaps are written; they are marked so
-the model reads them as accounts of the session, not as new events.
+the model reads them as accounts of the session, not as new events. Those from
+the evening before are marked too: they may report something released after
+that close, which matters today, or only recap the earlier session.
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
@@ -22,6 +25,7 @@ SUMMARY_CHARS = 500
 RECAP_HOURS = 4
 MARKET_SYMBOLS = ("SPY", "QQQ")
 ALPACA_PAGES = 3
+MIN_CONTEXT_SCORE = 2
 
 
 def news_window(prev_date: Optional[str], day: str) -> tuple:
@@ -103,17 +107,24 @@ def fetch_alpaca(symbol: str, start: datetime, end: datetime, key: str,
         # late recap of the move, not the overnight news that caused it.
         # Alpaca writes share classes with a dot (BRK.B).
         "symbols": symbol.replace("-", "."), "start": _iso(start),
-        "end": _iso(end), "limit": 50, "sort": "asc",
+        "end": _iso(end), "limit": 50,
+        # Several symbols are a search for the day's recaps, which come last.
+        "sort": "desc" if "," in symbol else "asc",
         "include_content": "false"}
     out = []
-    for _ in range(ALPACA_PAGES if "," in symbol else 1):
-        response = http_get(
-            ALPACA_NEWS_URL,
-            headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret,
-                     "accept": "application/json"},
-            params=dict(params), timeout=20)
-        response.raise_for_status()
-        body = response.json() or {}
+    for page in range(ALPACA_PAGES if "," in symbol else 1):
+        try:
+            response = http_get(
+                ALPACA_NEWS_URL,
+                headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret,
+                         "accept": "application/json"},
+                params=dict(params), timeout=20)
+            response.raise_for_status()
+            body = response.json() or {}
+        except Exception:
+            if page == 0:
+                raise
+            break       # keep the pages already read
         raw = body.get("news") or []
         for item in raw if isinstance(raw, list) else []:
             if not isinstance(item, dict):
@@ -142,7 +153,8 @@ def fetch_google(query: str, start: datetime, end: datetime) -> list:
     from strategies.google_news import fetch_google_news
 
     raw = fetch_google_news(
-        keywords=[query],
+        # The helper only escapes spaces; a bare "&" (AT&T) would end the query.
+        keywords=[query.replace("&", "%26")],
         start_date=start.replace(tzinfo=None),
         # Google's "before:" excludes the date it names, so ask through the
         # next day; the stamp check below still enforces the real window.
@@ -175,20 +187,39 @@ _RECAP_WORDS = ("stock market today", "stocks", "wall street", "nasdaq", "s&p",
 _MOVE_WORDS = ("falls", "fall ", "drops", "plunge", "slides", "sinks", "tumble",
                "slump", "crash", "jumps", "surges", "soars", "rallies", "climbs",
                "rises", "gains", "moving", "trading", "higher", "lower", "why ")
+_EVENT_WORDS = ("earnings", "results", "guidance", "forecast", "outlook",
+                "launch", "unveil", "beats", "misses", "upgrade", "downgrade",
+                "acquire", "acquisition")
 _NOISE_WORDS = ("price target", "maintains", "reiterates", "initiates coverage",
                 "investigation", "class action", "shareholder alert", "deadline")
 
 
-def _context_score(title: str, symbol: str, name: str, group: str) -> int:
+def _names(title: str, symbol: str) -> bool:
+    """True when the title names the ticker itself. Case matters: NOW, IT, ON
+    and ALL are also ordinary words."""
+    return re.search(rf"(?<![A-Za-z0-9]){re.escape(symbol)}(?![A-Za-z0-9])", title) is not None
+
+
+def _about_company(title: str, symbol: str, name: str) -> bool:
+    return bool(name and name.lower() in title.lower()) or _names(title, symbol)
+
+
+def _context_score(title: str, symbol: str, name: str, group: str,
+                   peers: tuple = ()) -> int:
     """How useful a peer or market article is for explaining a group move."""
     text = f" {title.lower()} "
     score = 0
-    if name and name.lower() in text or f" {symbol.lower()} " in text:
+    if _about_company(title, symbol, name):
         score += 3
     if any(word in text for word in _RECAP_WORDS):
         score += 2
     if any(word in text for word in _MOVE_WORDS):
         score += 2
+    # A peer's results or a launch is what usually moves a whole group.
+    if any(word in text for word in _EVENT_WORDS):
+        score += 2
+    if any(_names(title, peer) for peer in peers):
+        score += 1
     if group and group.replace("_", " ").split()[0] in text:
         score += 1
     if any(word in text for word in _NOISE_WORDS):
@@ -214,11 +245,14 @@ def _unique(found: list, seen: set) -> list:
     return out
 
 
-def _public(article: dict, scope: str, after_close: bool = False) -> dict:
+def _public(article: dict, scope: str, after_close: bool = False,
+            previous_evening: bool = False) -> dict:
     row = {k: v for k, v in article.items() if not k.startswith("_")}
     row["scope"] = scope
     if after_close:
         row["after_close"] = True
+    if previous_evening:
+        row["previous_evening"] = True
     return row
 
 
@@ -254,11 +288,22 @@ def articles_for(symbol: str, prev_date: Optional[str], day: str, *,
     context += _safe(google, f"{label} stocks" if label else "stock market today",
                      start, recap_end)
     context = _unique(context, seen)
-    scored = [(_context_score(a["title"], symbol, name, group), a) for a in context]
-    scored = [pair for pair in scored if pair[0] > 0]
-    scored.sort(key=lambda pair: (-pair[0], pair[1]["published_at"]))
     end_iso = _iso(end)
+    evening_iso = _iso(start + timedelta(hours=RECAP_HOURS))
+    # A write-up about the company itself from after the close may carry
+    # results or a deal announced after it, so it is left out.
+    context = [a for a in context
+               if not (a["published_at"] > end_iso
+                       and _about_company(a["title"], symbol, name))]
+    scored = [(_context_score(a["title"], symbol, name, group, tuple(peers)), a)
+              for a in context]
+    # 2 and up: a bare mention of a peer or the industry is not enough.
+    scored = [pair for pair in scored if pair[0] >= MIN_CONTEXT_SCORE]
+    # Best first; among equals the latest, which is the recap of this session.
+    scored.sort(key=lambda pair: pair[1]["published_at"], reverse=True)
+    scored.sort(key=lambda pair: -pair[0])
 
     return ([_public(a, "company") for a in company]
-            + [_public(a, "context", a["published_at"] > end_iso)
+            + [_public(a, "context", a["published_at"] > end_iso,
+                       a["published_at"] <= evening_iso)
                for _, a in scored[:MAX_CONTEXT]])

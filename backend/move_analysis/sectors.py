@@ -2,6 +2,7 @@
 and the peers and company name the explanation step uses."""
 from __future__ import annotations
 
+import re
 import threading
 from typing import Callable, Optional
 
@@ -91,7 +92,10 @@ def profile_for(symbol: str, *, lookup: Optional[Callable] = None) -> dict:
         "industry": str(raw.get("industry") or "").strip().lower(),
         "name": " ".join(str(raw.get("name") or "").split())[:80],
     }
-    if lookup is None and profile["sector"] and profile["sector"] != "unknown":
+    # A fund has a name and no sector; that is an answer worth keeping. A
+    # reply with neither is a failed lookup and is asked again.
+    if lookup is None and profile["sector"] != "unknown" and (
+            profile["sector"] or profile["name"]):
         with _LOCK:
             _PROFILES[symbol] = dict(profile)
     return profile
@@ -122,6 +126,17 @@ def company_name(symbol: str) -> str:
     return name.strip(" ,")
 
 
+_US_TICKER = re.compile(r"^[A-Z]{1,5}([.-][A-Z])?$")
+
+
+def _us_ticker(raw) -> Optional[str]:
+    """A US ticker with its share class written with a dash (BRK-B). None for
+    a foreign listing (AEM.TO, 3800.HK), which the price and news providers
+    here do not carry under that name."""
+    text = str(raw or "").strip().upper()
+    return text.replace(".", "-") if _US_TICKER.match(text) else None
+
+
 def _holdings_lookup(etf: str) -> list:
     import yfinance as yf
 
@@ -142,8 +157,8 @@ def peers_for(symbol: str, etf: Optional[str], *,
         cached = None
     if cached is None:
         try:
-            cached = [s.strip().upper().replace(".", "-")
-                      for s in (lookup or _holdings_lookup)(etf) if str(s).strip()]
+            cached = [t for t in (_us_ticker(s) for s in (lookup or _holdings_lookup)(etf))
+                      if t]
         except Exception:
             return []
         if lookup is None and cached:

@@ -515,3 +515,53 @@ def test_market_context_reports_peers_and_groups_for_the_day(monkeypatch):
     peers = dict(context["peers"])
     assert peers["CRM"] > 3 and peers["NOPE"] is None
     assert [label for label, _ in context["tape"]][0] == "S&P 500 (SPY)"
+
+
+def test_a_model_failure_on_a_market_day_keeps_the_split_as_its_label(store):
+    svc.put_settings(store, {"model_id": "m1"})
+
+    def _factory(doc):
+        raise RuntimeError("no key")
+
+    svc.queue_explain(store, "NVDA", "3M", [JUMP_DAY], False, spawn=lambda fn: fn(),
+                      articles_fn=lambda *a: [{"title": "x", "summary": "", "url": "",
+                                               "source": "B", "published_at": "z"}],
+                      llm_factory=_factory, **_inject(market_drop={JUMP_DAY: -0.06}))
+    row = store.get("MoveEvents", f"NVDA|{JUMP_DAY}")
+    assert row["status"] == "explained" and row["category"] == "market"
+
+
+def test_the_live_path_hands_peers_and_the_fund_to_the_news_search(store, monkeypatch):
+    from move_analysis import news as nw
+    from move_analysis import sectors as sc
+    svc.put_settings(store, {"model_id": "m1"})
+    asked = {}
+    monkeypatch.setattr(sc, "company_name", lambda s: "NVIDIA")
+    monkeypatch.setattr(sc, "peers_for", lambda s, etf: ["AMD", "AVGO", "MU"])
+    monkeypatch.setattr(px, "day_moves", lambda symbols, start, **kw: {
+        "AMD": {JUMP_DAY: 1.0}, "AVGO": {JUMP_DAY: 0.5}, "MU": {JUMP_DAY: -0.2}})
+    monkeypatch.setattr(nw, "alpaca_credentials", lambda store, bid=None: ("k", "s"))
+
+    def _articles(symbol, prev, day, **kw):
+        asked.update(kw, symbol=symbol)
+        return [{"title": "Broker cuts NVDA", "summary": "", "url": "https://e.com/a",
+                 "source": "B", "published_at": "2026-11-10T13:00:00Z", "scope": "company"}]
+
+    monkeypatch.setattr(nw, "articles_for", _articles)
+    prompts = []
+
+    def _factory(doc):
+        def _call(prompt, system):
+            prompts.append(prompt)
+            return {"category": "analyst", "headline": "Cut", "explanation": "x",
+                    "confidence": "high", "cited": [1]}
+        return _call
+
+    out = svc.queue_explain(store, "NVDA", "3M", [JUMP_DAY], False, spawn=lambda fn: fn(),
+                            llm_factory=_factory,
+                            **_inject(jumps={"NVDA": {JUMP_DAY: 0.09}}))
+    assert out == {"queued": 1}
+    assert asked["name"] == "NVIDIA" and asked["peers"] == ("AMD", "AVGO", "MU")
+    assert asked["etf"] == "XLK" and asked["credentials"] == ("k", "s")
+    assert "Stock: NVDA (NVIDIA)" in prompts[0] and "moved largely on its own" in prompts[0]
+    assert store.get("MoveEvents", f"NVDA|{JUMP_DAY}")["category"] == "analyst"

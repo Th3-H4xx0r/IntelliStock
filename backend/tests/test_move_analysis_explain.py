@@ -322,7 +322,8 @@ def test_a_several_symbol_request_reads_more_than_one_page():
 
 def test_peers_and_company_name_come_from_the_benchmark_fund():
     from move_analysis import sectors as sc
-    holdings = lambda etf: ["MSFT", "NOW", "CRM", "BRK.B"] + [f"P{i}" for i in range(12)]
+    holdings = lambda etf: ["MSFT", "NOW", "CRM", "BRK.B", "AEM.TO", "3800.HK"] + [
+        "P" + "ABCDEFGHIJKL"[i] for i in range(12)]
     peers = sc.peers_for("NOW", "IGV", lookup=holdings)
     assert peers[:3] == ["MSFT", "CRM", "BRK-B"] and "NOW" not in peers
     assert len(peers) == sc.MAX_PEERS
@@ -334,3 +335,75 @@ def test_peers_and_company_name_come_from_the_benchmark_fund():
                                                    "industry": "consumer-electronics"}) == ("technology", "XLK")
     assert sc.sector_for("JPM", lookup=lambda s: "Financial Services") == ("financial_services", "XLF")
     assert sc.sector_for("ZZZ", lookup=lambda s: 1 / 0) == (None, None)
+
+
+def test_a_peers_results_and_a_launch_reach_the_model():
+    kept = lambda title: nw._context_score(title, "CRM", "Salesforce", "software",
+                                           ("ORCL", "ADBE")) >= nw.MIN_CONTEXT_SCORE
+    assert kept("Oracle Q2 earnings: revenue misses, cloud guidance raised")
+    assert kept("Anthropic launches Claude agents for enterprise IT workflows")
+    assert kept("ORCL shares slide after results")
+    assert not kept("ORCL names a new finance chief")       # a bare peer mention
+    assert not kept("Analyst maintains Oracle price target after earnings")
+    assert not kept("A recipe for autumn soup")
+
+
+def test_a_ticker_that_is_a_word_is_matched_by_case():
+    score = lambda title: nw._context_score(title, "NOW", "ServiceNow", "", ())
+    assert score("Markets are now pricing in a cut") == 0
+    assert score("Why NOW is sliding with Salesforce") >= 3
+    assert score("ServiceNow slides with Salesforce") >= 3
+
+
+def test_recaps_are_marked_by_which_session_they_follow():
+    def _alpaca(symbols, start, end, key, secret):
+        if "," not in symbols:
+            return []
+        return [
+            {"title": "Stock Market Today: software tumbles", "summary": "", "url": "",
+             "source": "B", "published_at": "2026-10-01T21:30:00Z", "_breadth": 30},
+            {"title": "Stock Market Today: software rallies", "summary": "", "url": "",
+             "source": "B", "published_at": "2026-10-02T21:30:00Z", "_breadth": 30},
+            {"title": "ServiceNow stock soars after earnings beat", "summary": "", "url": "",
+             "source": "B", "published_at": "2026-10-02T20:10:00Z", "_breadth": 1},
+        ]
+
+    got = nw.articles_for("NOW", "2026-10-01", "2026-10-02", credentials=("k", "s"),
+                          name="ServiceNow", peers=("CRM",), etf="IGV", group="software",
+                          alpaca=_alpaca, google=lambda *a: [])
+    # This session's recap first; the company's own after-close news left out.
+    assert [a["title"] for a in got] == ["Stock Market Today: software rallies",
+                                         "Stock Market Today: software tumbles"]
+    assert got[0].get("after_close") and got[1].get("previous_evening")
+    prompt = ex.build_prompt(EVENT, got)
+    assert "| after close |" in prompt and "| previous evening |" in prompt
+    assert "previous evening" in ex.SYSTEM_PROMPT
+
+
+def test_a_failed_later_page_keeps_the_first_and_an_ampersand_is_escaped(monkeypatch):
+    calls = []
+
+    class _Resp:
+        def raise_for_status(self):
+            if len(calls) > 1:
+                raise RuntimeError("429")
+
+        def json(self):
+            return {"news": [{"headline": "Kept", "url": "https://e.com/x",
+                              "created_at": "2026-10-02T12:00:00Z", "symbols": ["AMD"]}],
+                    "next_page_token": "t2"}
+
+    def _get(url, headers, params, timeout):
+        calls.append(params["sort"])
+        return _Resp()
+
+    start, end = nw.news_window("2026-10-01", "2026-10-02")
+    got = nw.fetch_alpaca("AMD,AVGO", start, end, "k", "s", http_get=_get)
+    assert [a["title"] for a in got] == ["Kept"] and calls == ["desc", "desc"]
+
+    import strategies.google_news as gn
+    seen = {}
+    monkeypatch.setattr(gn, "fetch_google_news",
+                        lambda **kw: seen.update(kw) or [])
+    nw.fetch_google("AT&T stock", start, end)
+    assert seen["keywords"] == ["AT%26T stock"]

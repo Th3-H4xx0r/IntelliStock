@@ -64,7 +64,10 @@ SYSTEM_PROMPT = (
     "'after close' may be used only for their account of what happened "
     "during the session; anything first announced after 16:00 New York "
     "time, such as results, guidance or a deal, came after this move and "
-    "cannot explain it.\n"
+    "cannot explain it. Articles marked 'previous evening' count only for "
+    "what was released after the previous close, such as a peer's results; "
+    "their account of the previous session's trading explains nothing "
+    "about this one.\n"
     "4. It must point the right way. Bad news does not explain a rise, nor "
     "good news a fall, unless an article itself reports that reaction.\n"
     "5. On the first session after the company reports results, the "
@@ -159,7 +162,8 @@ def build_prompt(event: dict, articles: list, context: Optional[dict] = None) ->
         lines.append(title)
         for article in rows:
             number += 1
-            mark = " | after close" if article.get("after_close") else ""
+            mark = (" | after close" if article.get("after_close")
+                    else " | previous evening" if article.get("previous_evening") else "")
             lines.append(f"[{number}] {article['published_at']}{mark} | "
                          f"{article['source']} | {article['title']}")
             if article.get("summary"):
