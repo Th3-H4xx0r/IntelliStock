@@ -50,6 +50,14 @@ _SESSION_KEY = "_strategy_pairs_session"
 _SIGNALS_KEY = "_strategy_pairs_signals"
 _LAST_DECISION_KEY = "_strategy_pairs_last"
 _LOGGED_KEY = "_strategy_pairs_logged"
+#: Set when orders go out; the NEXT tick is sat out. An order placed on tick T
+#: is not in the book on tick T+1 at daily steps (it fills at that session's
+#: close), so deciding again on T+1 re-sends the same orders against a book
+#: that has not moved yet.
+_SIT_OUT_KEY = "_strategy_pairs_sit_out"
+#: The share of a same-tick funding sell the broker lets a buy spend
+#: (nexus_broker_utils.buy_ceiling).
+_PENDING_SELL_CREDIT = 0.95
 
 
 def _truthy(value) -> bool:
@@ -99,6 +107,8 @@ class StrategyPairs:
             return {}
 
         cache = strategy_cache if isinstance(strategy_cache, dict) else {}
+        if cache.pop(_SIT_OUT_KEY, False):
+            return {}
         pairs = pairs_of(cfg)
         universe = strategy_pairs_universe(cfg)
         if not pairs:
@@ -178,6 +188,22 @@ class StrategyPairs:
         band = max(0.0, _f(cfg, "core_band_pct"))
         if cash / nav > band:
             order_cfg = {**cfg, "core_band_pct": 0.0}
+        # A rotation sells one leg and buys the other in the SAME payload, and
+        # `targets_to_orders` sizes the buy from cash on hand, which does not
+        # yet hold the sale. Measured on BT 543938: a $97,543 sell went out
+        # beside a $2,061 buy and the book averaged 35% cash. With the lane's
+        # pending-sell credit on, the broker lets a buy spend 95% of the
+        # same-tick sell, so the buy is sized against that here.
+        if _truthy(cfg.get("backtest_credit_pending_sell_proceeds", False)):
+            exits = 0.0
+            for symbol in universe:
+                value = (float(positions.get(symbol) or 0.0)
+                         * float(eff.get(symbol) or 0.0))
+                excess = value - targets.get(symbol, 0.0) * nav
+                if excess > 0 and (targets.get(symbol, 0.0) <= 0
+                                   or excess / nav > band):
+                    exits += excess
+            cash += _PENDING_SELL_CREDIT * exits
         decisions, sizes = targets_to_orders(
             targets, nav=nav, positions=positions, prices=eff, cash=cash,
             config=order_cfg, owned=set(universe))
@@ -195,6 +221,7 @@ class StrategyPairs:
                  f"nav=${nav:,.0f}", "cyan")
         if not decisions:
             return {}
+        cache[_SIT_OUT_KEY] = True
 
         out = dict(decisions)
         sizes = dict(sizes)

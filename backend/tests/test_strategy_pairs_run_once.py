@@ -106,10 +106,33 @@ def test_a_flip_sells_the_old_leg_and_buys_the_new_one_on_the_same_tick():
     assert out["_nexus_position_sizes"]["KO"]["sell_fraction"] == 1.0
     assert out["_nexus_action_intents"] == {"KO": "etf_sell"}
     assert "KO" in out["_nexus_sell_enforcement"]
-    # With the pending-sell credit the buy goes out on the same tick.
-    credited = FakeEmulator(cash=0.0, positions={}, pending_credit=10000.0)
-    out = run(cfg(mode="reversal"), PEP_LAGS, credited)
+    # The buy goes out in the same payload, sized against 95% of the sale.
     assert out["PEP"] == 1
+    buy = out["_nexus_position_sizes"]["PEP"]["buy_cash"]
+    assert 9300 < buy <= 9500
+
+
+def test_without_the_credit_flag_the_flip_only_sells():
+    emulator = FakeEmulator(cash=0.0, positions={"KO": 200.0})
+    out = run(cfg(mode="reversal", backtest_credit_pending_sell_proceeds=False),
+              PEP_LAGS, emulator)
+    assert out["KO"] == -1 and "PEP" not in out
+
+
+def test_the_tick_after_an_order_is_sat_out():
+    cache = {}
+    assert run(cfg(mode="reversal"), KO_LAGS, FakeEmulator(), cache)["KO"] == 1
+    # The order is not in the book yet: the next tick does nothing ...
+    assert run(cfg(mode="reversal"), KO_LAGS, FakeEmulator(), cache) == {}
+    # ... and the one after decides again.
+    assert run(cfg(mode="reversal"), KO_LAGS, FakeEmulator(), cache)["KO"] == 1
+
+
+def test_a_tick_with_no_orders_does_not_arm_the_sit_out():
+    cache = {}
+    held = FakeEmulator(cash=0.0, positions={"KO": 200.0})
+    assert run(cfg(mode="reversal"), KO_LAGS, held, cache) == {}
+    assert "_strategy_pairs_sit_out" not in cache
 
 
 def test_no_orders_when_the_book_is_already_on_target():
@@ -137,6 +160,7 @@ def test_the_zscore_state_steps_once_per_session():
     assert cache["_strategy_pairs_signals"] == {"KO/PEP": 1}
     # A second tick in the same session replays the cached signal.
     cache["_strategy_pairs_signals"] = {"KO/PEP": -1}
+    cache.pop("_strategy_pairs_sit_out", None)
     out = run(c, market, FakeEmulator(), cache)
     assert out["PEP"] == 1 and "KO" not in out
 
