@@ -163,6 +163,54 @@ def login_second_factor_html(txn_id: str, username: str, *, error: Optional[str]
     )
 
 
+def enroll_password_html(username: str, *, error: Optional[str] = None) -> str:
+    """The enrollment's password form; the username is the one the admin CLI enrolled, shown read-only."""
+    return (
+        (message_html(error, error=True) + "\n" if error else "")
+        + '<p class="muted">Confirm your IntelliStock password. Then you add a passkey and an authenticator app.</p>\n'
+        + '<form method="post" action="/enroll/password">\n'
+        + '<label for="username">Username</label>\n'
+        + '<input id="username" name="username" autocomplete="username" readonly value="' + escape(username) + '">\n'
+        + '<label for="password">Password</label>\n'
+        + '<input id="password" name="password" type="password" autocomplete="current-password" required>\n'
+        + '<button type="submit">Continue</button>\n'
+        + "</form>"
+    )
+
+
+def enroll_passkey_html() -> str:
+    """The passkey registration button (mcp-auth.js drives it)."""
+    return (
+        '<p class="muted">Create a passkey on this device. Your browser asks for your device PIN, fingerprint or '
+        + "face.</p>\n"
+        + '<button type="button" data-webauthn="create" data-options-url="/enroll/passkey/options" '
+        + 'data-submit-url="/enroll/passkey" data-status="passkey-status">Create passkey</button>\n'
+        + '<p id="passkey-status" class="error" role="alert" hidden></p>'
+    )
+
+
+def enroll_totp_html(*, qr_data_uri: Optional[str] = None, secret: Optional[str] = None,
+                     error: Optional[str] = None) -> str:
+    """The code form, below the QR code and the secret on the page's one showing of them."""
+    shown = ""
+    if qr_data_uri is not None and secret is not None:
+        shown = (
+            '<p class="muted">Scan this QR code with your authenticator app. It is shown only once.</p>\n'
+            + '<img class="qr" src="' + escape(qr_data_uri) + '" alt="QR code for your authenticator app">\n'
+            + '<p class="muted">Or enter this key in the app:</p>\n'
+            + '<p><code id="totp-secret">' + escape(secret) + "</code></p>\n"
+        )
+    return (
+        (message_html(error, error=True) + "\n" if error else "")
+        + shown
+        + '<form method="post" action="/enroll/totp">\n'
+        + '<label for="code">Code from the app</label>\n'
+        + '<input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required>\n'
+        + '<button type="submit">Finish</button>\n'
+        + "</form>"
+    )
+
+
 AUTH_JS = r"""'use strict';
 // WebAuthn for the IntelliStock MCP sign-in and enrollment pages.
 // A button with data-webauthn="get" (sign-in) or "create" (enrollment) runs one ceremony: it POSTs
@@ -372,6 +420,7 @@ button.secondary { color: var(--accent); background: transparent; }
 button:disabled { opacity: 0.6; cursor: default; }
 input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 img { display: block; max-width: 100%; height: auto; margin: 16px auto; }
+img.qr { background: #ffffff; } /* the QR code's SVG is transparent: keep it scannable in dark mode */
 code { word-break: break-all; }
 [hidden] { display: none !important; }
 """
