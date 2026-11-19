@@ -105,6 +105,7 @@ def served(store, monkeypatch):
     monkeypatch.setattr(auth_utils, "ensure_users_table", lambda conn=None: None)
     monkeypatch.setattr(main, "ensure_users_table", lambda conn=None: None)
     auth_utils.reset_login_rate_limit()
+    monkeypatch.setattr(main, "_UNNAMED_PROXY_WARNED", set(), raising=False)
     main.app.dependency_overrides[main.conn_dependency] = lambda: None
     try:
         monkeypatch.setenv("FORWARDED_ALLOW_IPS", "10.0.0.0/8")
@@ -284,3 +285,49 @@ def test_forwarded_for_from_an_untrusted_peer_is_ignored(served):   # straight t
     for i in range(10):
         direct.post("/auth/login", json=BAD, headers={"X-Forwarded-For": f"192.0.2.{i}"})
     assert auth_utils.login_is_rate_limited("root", "198.51.100.9")
+
+
+def test_an_unnamed_hop_cannot_lock_everyone_out(served):
+    # The frontend nginx /api/ fallback or a tailscale serve path: it sends
+    # X-Forwarded-For, but its address is outside 10.0.0.0/8, so uvicorn keeps
+    # the hop's address and every client behind it would share one per-IP count.
+    app, _ = served
+    via_hop = _via(app, "172.18.0.9")
+    for i in range(30):
+        bad = {"username": f"user{i}", "password": "wrong-password"}
+        assert via_hop.post("/auth/login", json=bad, headers={"X-Forwarded-For": f"203.0.113.{i}"}).status_code == 401
+    ok = via_hop.post("/auth/login", json={"username": "root", "password": "the-right-password"},
+                      headers={"X-Forwarded-For": "198.51.100.7"})
+    assert ok.status_code == 200
+
+
+
+def test_listing_the_hops_address_locks_out_no_one_else(served):
+    # nginx's $proxy_add_x_forwarded_for appends the address it saw to the
+    # client's own header, so a client behind the hop can write the hop's
+    # address into every entry but the last. Those requests then count against
+    # the hop's address, but the operator's request does not list the hop, so
+    # it is never checked against that count.
+    app, _ = served
+    via_hop = _via(app, "172.18.0.9")
+    for i in range(30):
+        bad = {"username": f"user{i}", "password": "wrong-password"}
+        forged = {"X-Forwarded-For": f"172.18.0.9, 203.0.113.{i}"}
+        assert via_hop.post("/auth/login", json=bad, headers=forged).status_code == 401
+    ok = via_hop.post("/auth/login", json={"username": "root", "password": "the-right-password"},
+                      headers={"X-Forwarded-For": "198.51.100.7"})
+    assert ok.status_code == 200
+
+
+def test_through_a_named_proxy_the_per_ip_count_still_applies(served):
+    # X-Forwarded-For with a port: uvicorn hands the route the bare host, which
+    # must still count as a rewritten request.
+    app, _ = served
+    via_traefik = _via(app, "10.0.1.2")
+    client = {"X-Forwarded-For": "203.0.113.5:4711"}
+    for i in range(30):
+        bad = {"username": f"user{i}", "password": "wrong-password"}
+        assert via_traefik.post("/auth/login", json=bad, headers=client).status_code == 401
+    right = {"username": "root", "password": "the-right-password"}
+    assert via_traefik.post("/auth/login", json=right, headers=client).status_code == 429
+    assert via_traefik.post("/auth/login", json=right, headers={"X-Forwarded-For": "198.51.100.7"}).status_code == 200

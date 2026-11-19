@@ -75,7 +75,7 @@ from auth_utils import (
     set_onboarding_completed,
     MIN_PASSWORD_LENGTH,
 )
-from api.server_config import trusted_proxy_configured
+from api.server_config import trusted_proxy_configured, trusted_proxy_entries
 from strategies_meta import get_available_strategies
 from stock_credential_boundary import StockCredentialError
 # Module level so it is monkeypatchable, and because it imports nothing heavier
@@ -1398,7 +1398,74 @@ def _client_host(request: Request | None) -> str:
     return "unknown"
 
 
-def _per_ip_limit_applies(client_host: str) -> bool:
+# Peers already named in an unnamed-proxy warning (_from_unnamed_proxy).
+# Capped, so a stream of distinct peers cannot grow it without bound; past the
+# cap new peers are still treated as unnamed proxies, just not logged.
+_UNNAMED_PROXY_WARNED: set = set()
+_UNNAMED_PROXY_WARNED_MAX = 256
+
+
+def _forwarded_for_hosts(request: Request | None) -> set:
+    """Every X-Forwarded-For entry on the request, as written and as uvicorn reads it.
+
+    Uvicorn sets ``request.client`` to one entry's host, without a ``:port``
+    or IPv6 brackets, so both spellings are kept. Every header line counts.
+    """
+    hosts: set = set()
+    try:
+        values = request.headers.getlist("x-forwarded-for")
+    except Exception:
+        return hosts
+    for value in values:
+        for entry in str(value).split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            hosts.add(entry)
+            if entry.startswith("["):
+                end = entry.find("]")
+                if end > 1:
+                    hosts.add(entry[1:end])
+            elif entry.count(":") == 1:
+                hosts.add(entry.split(":", 1)[0])
+    return hosts
+
+
+def _from_unnamed_proxy(request: Request | None, client_host: str) -> bool:
+    """Whether the request came through a proxy FORWARDED_ALLOW_IPS does not name.
+
+    Uvicorn replaces the client address with an X-Forwarded-For entry only
+    for a peer named there. A request that carries the header while its client
+    is none of the entries was passed on by a hop that is not named: the web
+    frontend's nginx ``/api/`` fallback, a ``tailscale serve`` path onto the
+    published port, or Traefik after its address changed. Every client behind
+    that hop shares its address. Logs one warning per peer, naming the address
+    to add. A direct caller can forge the header to land here, which only
+    takes it back to the per-(username, IP) limit. A client behind the hop
+    that writes the hop's own address into the header is not caught here, so
+    its failures count against the hop's address; but only requests that list
+    the hop are ever checked against that count, so it locks out no one else.
+    """
+    hosts = _forwarded_for_hosts(request)
+    if not hosts or client_host in hosts:
+        return False
+    if (client_host not in _UNNAMED_PROXY_WARNED
+            and len(_UNNAMED_PROXY_WARNED) < _UNNAMED_PROXY_WARNED_MAX):
+        _UNNAMED_PROXY_WARNED.add(client_host)
+        import logging
+        logging.getLogger("uvicorn.error").warning(
+            "Login from %s carries X-Forwarded-For, but FORWARDED_ALLOW_IPS (%s) does "
+            "not name that peer, so every client behind it shares its address; the "
+            "per-IP login limit is skipped for it. If %s is a proxy in front of the "
+            "API, add it to FORWARDED_ALLOW_IPS (docs/runbooks/users-and-login.md).",
+            client_host,
+            ",".join(trusted_proxy_entries(os.environ.get("FORWARDED_ALLOW_IPS"))),
+            client_host,
+        )
+    return True
+
+
+def _per_ip_limit_applies(request: Request | None, client_host: str) -> bool:
     """Whether a failed login also counts against the host across usernames.
 
     With no proxy named in FORWARDED_ALLOW_IPS, a non-loopback peer is the
@@ -1406,9 +1473,12 @@ def _per_ip_limit_applies(client_host: str) -> bool:
     per-IP count would be one global count and a stranger's spray would lock
     out everyone, the operator included. The count applies once a proxy is
     named (uvicorn then hands the route the real client) or when the peer is
-    loopback. The per-(username, IP) limit and the signup limit apply either
-    way.
+    loopback, except for a request from a hop that is not named
+    (``_from_unnamed_proxy``), whose address is shared in the same way. The
+    per-(username, IP) limit and the signup limit apply either way.
     """
+    if _from_unnamed_proxy(request, client_host):
+        return False
     return trusted_proxy_configured() or client_host in ("127.0.0.1", "::1", "localhost")
 
 
@@ -1458,7 +1528,7 @@ def api_login(body: LoginBody, request: Request = None, conn=Depends(conn_depend
     """
     username = (body.username or "").strip().lower()
     client_host = _client_host(request)
-    per_ip = _per_ip_limit_applies(client_host)
+    per_ip = _per_ip_limit_applies(request, client_host)
     if login_is_rate_limited(username, client_host, per_ip=per_ip):
         raise HTTPException(
             status_code=429,
