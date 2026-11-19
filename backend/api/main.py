@@ -1027,12 +1027,23 @@ class UpdateBrokerageBody(BaseModel):
     alpaca_data_feed: Optional[str] = Field(default=None, pattern="^(iex|sip)$")
 
 
+#: Headers a proxy adds on the way in. Traefik sets them on every request it
+#: forwards; the in-container callers (llm_utils, the chatbot MCP server) never do.
+_FORWARDING_HEADERS = ("x-forwarded-for", "forwarded", "x-real-ip")
+
+
 def _require_loopback(request) -> None:
     """Reject anything that did not originate inside the container.
 
-    llm_utils posts raw model output to this endpoint over plain HTTP with no
-    token; adding auth would break that caller, so the boundary is the network
-    instead. Without it the route is an unauthenticated disk-fill primitive.
+    llm_utils posts raw model output to /llm/outputs over plain HTTP with no
+    token, and the chatbot MCP server calls /chatbot/internal/* back over
+    loopback; the boundary for them is the network. Without it /llm/outputs
+    is an unauthenticated disk-fill primitive.
+
+    A loopback peer is not enough. Behind a trusted proxy uvicorn rewrites the
+    client address from X-Forwarded-For, so a forged "127.0.0.1" sent through
+    it would read as loopback here. A request carrying any forwarding header
+    came through a proxy, and is refused whatever its client address says.
     """
     host = ""
     try:
@@ -1040,6 +1051,12 @@ def _require_loopback(request) -> None:
     except Exception:
         host = ""
     if host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="loopback only")
+    try:
+        forwarded = any(name in request.headers for name in _FORWARDING_HEADERS)
+    except Exception:
+        forwarded = True
+    if forwarded:
         raise HTTPException(status_code=403, detail="loopback only")
 
 
@@ -1892,9 +1909,10 @@ def api_mcp_tools_list(
     request: Request,
     conn=Depends(conn_dependency),
 ):
-    """List the tool catalog for an MCP-driven CC session. Auth'd by the
-    per-session token the IntelliStock backend wrote into the spawned
-    CC's ``--mcp-config`` env."""
+    """List the tool catalog for an MCP-driven CC session. Loopback-only, and
+    auth'd by the per-session token the IntelliStock backend wrote into the
+    spawned CC's ``--mcp-config`` env."""
+    _require_loopback(request)
     _resolve_mcp_session(request, body.conversation_id)
     from chatbot.tools import openai_tool_definitions
     return {"tools": openai_tool_definitions()}
@@ -1913,8 +1931,10 @@ def api_mcp_tool_call(
     ``pending_confirmation`` message to the conversation and return a
     ``pending`` envelope to CC so the model can acknowledge the queued
     action; the user then approves or declines via
-    ``/chatbot/conversations/{id}/mcp-confirm``.
+    ``/chatbot/conversations/{id}/mcp-confirm``. Loopback-only, like the
+    tools list: the MCP server calling it runs in this container.
     """
+    _require_loopback(request)
     sess = _resolve_mcp_session(request, body.conversation_id)
     from chatbot.mcp_bridge import dispatch_mcp_tool_call
     return dispatch_mcp_tool_call(
