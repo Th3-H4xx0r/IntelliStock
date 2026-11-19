@@ -7,6 +7,7 @@ FakeApi; the throttle, the audit sink, TOTP, passkeys (against SoftAuthenticator
 and the login transactions all run for real on one AuthDB. Each httpx client is
 one browser, with its own cookie jar.
 """
+import asyncio
 import base64
 import hashlib
 import html
@@ -26,7 +27,7 @@ from fake_api import VERIFY_PASSWORD_PATH, FakeApi
 from mcp_server.audit import AuditSink
 from mcp_server.authdb import AuthDB
 from mcp_server.config import LOGIN_TXN_TTL_S, SCOPE
-from mcp_server.login import login_routes
+from mcp_server.login import _UserLocks, login_routes
 from mcp_server.oauth_provider import IntelliStockOAuthProvider, build_auth_routes
 from mcp_server.pages import WebDeps, security_headers, static_routes
 from mcp_server.passkeys import PasskeyService
@@ -100,15 +101,44 @@ def enrolled(deps):
     return seed_enrolled_user(deps.db, deps.passkeys, deps.totp)
 
 
-def _browser(deps):
-    app = Starlette(routes=build_auth_routes(deps.provider, deps.settings) + login_routes(deps) + static_routes())
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=deps.settings.public_base)
+@pytest.fixture
+def app(deps):
+    """One server: every browser in a test talks to this app."""
+    return Starlette(routes=build_auth_routes(deps.provider, deps.settings) + login_routes(deps) + static_routes())
+
+
+def _browser(app, settings):
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=settings.public_base)
 
 
 @pytest.fixture
-async def browser(deps):
-    async with _browser(deps) as http:
+async def browser(app, settings):
+    async with _browser(app, settings) as http:
         yield http
+
+
+class _SlowPasswords:
+    """verify-password answered after a pause, as a busy API answers; records calls and the most in flight at once."""
+
+    def __init__(self, users):
+        self.users = users
+        self.calls = []
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def __call__(self, request):
+        body = json.loads(request.content)
+        self.calls.append(body["username"])
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(0.02)
+        finally:
+            self.in_flight -= 1
+        known = self.users.get(body["username"])
+        if known is None or known[0] != body["password"]:
+            return httpx.Response(401, json={"detail": "invalid credentials"})
+        return httpx.Response(200, json={"user_id": known[1], "username": body["username"]})
 
 
 def _origin(settings):
@@ -308,11 +338,11 @@ async def test_unenrolled_user_same_generic_message(browser, deps, settings, enr
     assert _failures(db) == [("operator", "password"), ("newbie", "password")]
 
 
-async def test_cookie_from_other_browser_rejected(browser, deps, settings, enrolled, fake, clock):
+async def test_cookie_from_other_browser_rejected(app, browser, deps, settings, enrolled, fake, clock):
     _, secret = enrolled
     txn_id, _ = await _open(browser, settings)
     forged = {**_origin(settings), "Cookie": "mcp_login=mcplc_" + secrets.token_urlsafe(32)}
-    async with _browser(deps) as other:
+    async with _browser(app, settings) as other:
         opened = await other.get("/login", params={"txn": txn_id})
         assert opened.status_code == 400
         assert OTHER_BROWSER in opened.text
@@ -327,7 +357,7 @@ async def test_cookie_from_other_browser_rejected(browser, deps, settings, enrol
     # The browser that opened the link signs in; the second factor is bound to it as well.
     await _password(browser, settings, txn_id)
     code = _code(secret, clock)
-    async with _browser(deps) as other:
+    async with _browser(app, settings) as other:
         assert (await other.get("/login/second", params={"txn": txn_id})).status_code == 400
         assert (await _options(other, settings, txn_id)).status_code == 400
         assert (await _send_assertion(other, settings, txn_id, {})).status_code == 400
@@ -607,3 +637,102 @@ async def test_malformed_requests_rejected(browser, deps, settings, enrolled):
     big = await browser.post("/login/totp", data={"txn": txn_id, "code": "1" * 20_000}, headers=_origin(settings))
     assert big.status_code == 413
     assert deps.provider.get_txn(txn_id).attempts == 1
+
+
+async def test_concurrent_password_guesses_cannot_outrun_the_lockout(app, browser, deps, settings, enrolled, fake,
+                                                                     db):
+    slow = _SlowPasswords(fake.users)
+    fake.set_route("POST", VERIFY_PASSWORD_PATH, 0, slow)
+    clients = [_browser(app, settings) for _ in range(30)]
+    try:
+        txns = [(await _open(client, settings))[0] for client in clients]
+        # Thirty browsers guess at once, under spellings of one username that the throttle counts as one.
+        names = ["operator", "Operator", " OPERATOR "]
+        responses = await asyncio.gather(*(
+            _password(client, settings, txn_id, names[n % 3], "guess")
+            for n, (client, txn_id) in enumerate(zip(clients, txns))))
+    finally:
+        for client in clients:
+            await client.aclose()
+    assert sorted(response.status_code for response in responses) == [401] * 5 + [429] * 25
+    assert len(slow.calls) == 5
+    assert slow.max_in_flight == 1  # one username's attempts run one at a time
+    assert _failures(db) == [("operator", "password")] * 5
+    assert [detail for event, detail in _events(db) if event == "lockout"] == [
+        {"scope": "user", "seconds": 900, "username": "operator"}]
+
+    # The right password after the lockout gets the lockout answer, and the API never sees it.
+    txn_id, _ = await _open(browser, settings)
+    response = await _password(browser, settings, txn_id)
+    assert response.status_code == 429
+    assert "Too many attempts. Try again in 15 min." in response.text
+    assert len(slow.calls) == 5
+
+
+async def test_concurrent_guesses_on_one_transaction_stop_at_five(browser, deps, settings, enrolled, fake, db):
+    slow = _SlowPasswords(fake.users)
+    fake.set_route("POST", VERIFY_PASSWORD_PATH, 0, slow)
+    txn_id, _ = await _open(browser, settings)
+    # Distinct usernames, so the per-user throttle never steps in: only the transaction's own limit applies.
+    responses = await asyncio.gather(*(_password(browser, settings, txn_id, f"nobody-{n}", "guess")
+                                       for n in range(30)))
+    assert sorted(response.status_code for response in responses) == [400] * 25 + [401] * 5
+    assert len(slow.calls) == 5
+    assert deps.provider.get_txn(txn_id) is None
+    response = await _password(browser, settings, txn_id)
+    assert response.status_code == 400
+    assert EXPIRED in response.text
+    assert len(slow.calls) == 5
+
+
+async def test_concurrent_second_factor_guesses_stop_at_five(browser, deps, settings, enrolled, clock, db):
+    _, secret = enrolled
+    txn_id, _ = await _past_password(browser, settings)
+    assert (await _options(browser, settings, txn_id)).status_code == 200
+    wrong = _wrong_code(secret, clock)
+    responses = await asyncio.gather(
+        *[_totp(browser, settings, txn_id, wrong) for _ in range(15)],
+        *[_send_assertion(browser, settings, txn_id, "not a credential") for _ in range(15)])
+    statuses = [response.status_code for response in responses]
+    assert statuses.count(401) == 5
+    assert set(statuses) <= {400, 401, 429}
+    assert len(_failures(db)) == 5
+    assert len([event for event, _ in _events(db) if event in ("totp_failed", "passkey_failed")]) == 5
+    assert deps.provider.get_txn(txn_id) is None
+    assert _last_step(db) == 0
+
+
+async def test_user_locks_serialise_one_name_and_forget_it():
+    locks = _UserLocks()
+    order = []
+
+    async def hold(name, tag):
+        async with locks.hold(name):
+            order.append(("in", tag))
+            await asyncio.sleep(0.01)
+            order.append(("out", tag))
+
+    await asyncio.gather(hold("operator", 1), hold("operator", 2), hold("other", 3))
+    same_name = [step for step in order if step[1] != 3]
+    assert same_name in ([("in", 1), ("out", 1), ("in", 2), ("out", 2)], [("in", 2), ("out", 2), ("in", 1), ("out", 1)])
+    assert order.index(("in", 3)) < order.index(("out", 1))  # another name does not wait
+    assert len(locks) == 0  # names are kept only while held or awaited
+
+    # A waiter cancelled in the queue leaves nothing behind either.
+    release = asyncio.Event()
+
+    async def holder():
+        async with locks.hold("operator"):
+            await release.wait()
+
+    first = asyncio.ensure_future(holder())
+    await asyncio.sleep(0)
+    waiter = asyncio.ensure_future(hold("operator", 4))
+    await asyncio.sleep(0)
+    assert len(locks) == 1
+    waiter.cancel()
+    release.set()
+    await first
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert len(locks) == 0

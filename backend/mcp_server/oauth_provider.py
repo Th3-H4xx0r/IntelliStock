@@ -8,8 +8,8 @@ AuthorizationHandler and TokenHandler, each behind a 16 KiB body limit.
 /authorize checks the request, stores a login transaction (new_token("mcptx_"),
 kept only as its hash, LOGIN_TXN_TTL_S) and sends the browser to
 /login?txn=<id>. The sign-in pages drive the transaction through the helpers
-below (get_txn, bind_txn_cookie, update_txn, fail_txn) and finish with
-complete_login, which deletes it and mints an authorization code
+below (get_txn, bind_txn_cookie, update_txn, reserve_attempt and
+settle_attempt, or fail_txn) and finish with complete_login, which deletes it and mints an authorization code
 (new_token("mcpac_"), hashed, AUTH_CODE_TTL_S) bound to the user the password
 step named.
 
@@ -325,6 +325,45 @@ class IntelliStockOAuthProvider:
                 return False
             conn.execute("UPDATE auth_txns SET attempts = ? WHERE txn_hash = ?", (attempts, txn_hash))
             return True
+
+    def reserve_attempt(self, txn_id: str, max_attempts: int = 5) -> bool:
+        """Count an attempt before its outcome is known; False when the txn is gone or max_attempts are counted.
+
+        Counting first is what keeps concurrent attempts on one transaction to
+        max_attempts. Each reservation is settled with settle_attempt, unless
+        complete_login consumes the transaction first.
+        """
+        if not _is_token(txn_id, TXN_PREFIX):
+            return False
+        with self._db.tx() as conn:
+            reserved = conn.execute(
+                "UPDATE auth_txns SET attempts = attempts + 1 WHERE txn_hash = ? AND attempts < ? AND expires_at > ?",
+                (hash_token(txn_id), max_attempts, self._clock()),
+            ).rowcount
+        return reserved == 1
+
+    def settle_attempt(self, txn_id: str, *, failed: bool, max_attempts: int = 5) -> bool:
+        """Settle a reserved attempt; False once the transaction is gone.
+
+        A failure stays counted, and one that lands with max_attempts counted
+        deletes the transaction. Any other outcome gives its attempt back.
+        """
+        if not _is_token(txn_id, TXN_PREFIX):
+            return False
+        txn_hash = hash_token(txn_id)
+        with self._db.tx() as conn:
+            row = conn.execute("SELECT attempts, expires_at FROM auth_txns WHERE txn_hash = ?", (txn_hash,)).fetchone()
+            if row is None:
+                return False
+            live = self._clock() < row["expires_at"]
+            if failed:
+                if row["attempts"] >= max_attempts or not live:
+                    conn.execute("DELETE FROM auth_txns WHERE txn_hash = ?", (txn_hash,))
+                    return False
+                return True
+            conn.execute("UPDATE auth_txns SET attempts = attempts - 1 WHERE txn_hash = ? AND attempts > 0",
+                         (txn_hash,))
+            return live
 
     def complete_login(self, txn_id: str, user_id: str) -> str:
         """Trade a signed-in transaction for an authorization code: the redirect URL with code and state.

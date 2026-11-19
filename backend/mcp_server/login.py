@@ -21,8 +21,18 @@ Every failed step (password, passkey or TOTP) counts against the username in
 LoginThrottle and against the transaction, which its fifth failure deletes. A
 right password does not clear the username's count; only a completed sign-in
 does, so a guesser who has the password still meets the lockout at the second
-factor. The lockout is checked before every attempt. An API outage, or the
-API's own rate limit, is nobody's failure and counts against nothing.
+factor. An API outage, or the API's own rate limit, is nobody's failure and
+counts against nothing.
+
+Concurrent requests cannot outrun these limits. Every attempt takes its
+username's turn: an asyncio.Lock per normalised username (the container is one
+process with one event loop), held from the lockout check, across the
+verify-password await, to the failure being recorded, with the transaction and
+the lockout checked again once the lock is held. Under the lock, one of the
+transaction's five attempts is reserved before the attempt runs, so parallel
+requests on one transaction under different usernames stop at five as well. A
+reservation is given back when the outcome is nobody's failure, and stays
+counted when the attempt ends in an exception.
 
 A passkey challenge is spent by the first assertion presented against it,
 whatever its outcome, with a compare-and-swap on the transaction row. Synced
@@ -33,8 +43,10 @@ The audit records login_ok, login_failed, passkey_failed and totp_failed; the
 throttle records lockout through its callback. The Tailscale-User-Login
 header goes into login_ok as information only. It authenticates nothing.
 """
+import asyncio
+import contextlib
 import math
-from typing import Any, Awaitable, Callable, List, Mapping, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Mapping, Optional
 from urllib.parse import quote
 
 from mcp.server.transport_security import RequestBodyLimitMiddleware
@@ -57,6 +69,7 @@ from mcp_server.pages import (
     render_page,
     security_headers,
 )
+from mcp_server.throttle import normalize_username
 
 LOGIN_COOKIE = "mcp_login"
 LOGIN_PATH = "/login"
@@ -99,12 +112,41 @@ def _field(form: Mapping[str, Any], name: str) -> str:
     return value if isinstance(value, str) else ""
 
 
+class _UserLocks:
+    """One asyncio.Lock per normalised username, kept only while a request holds or awaits it.
+
+    An entry is dropped when its last holder or waiter leaves, so the dict
+    never holds more names than there are requests in flight.
+    """
+
+    def __init__(self) -> None:
+        self._entries: Dict[str, List[Any]] = {}  # name -> [lock, holders and waiters]
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    @contextlib.asynccontextmanager
+    async def hold(self, name: str) -> AsyncIterator[None]:
+        entry = self._entries.get(name)
+        if entry is None:
+            entry = self._entries[name] = [asyncio.Lock(), 0]
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                yield
+        finally:
+            entry[1] -= 1
+            if entry[1] == 0:
+                del self._entries[name]
+
+
 class _LoginPages:
     """The /login endpoints over one WebDeps; see the module docstring for the flow."""
 
     def __init__(self, deps: WebDeps) -> None:
         self._deps = deps
         self._settings = deps.settings
+        self._locks = _UserLocks()
 
     # --- Endpoints -----------------------------------------------------------------------------
 
@@ -134,28 +176,10 @@ class _LoginPages:
         txn_id, username, password = (_field(form, name) for name in ("txn", "username", "password"))
         try:
             self._txn(request, txn_id, "password")
-            self._check_lockout(username)
+            async with self._turn(request, txn_id, "password", username):
+                return await self._check_password(txn_id, username, password)
         except _Refused as refused:
             return self._error_page(refused.status, refused.message)
-        if username and password:
-            check = await self._deps.api.verify_password(username, password)
-        else:
-            check = PasswordCheck("invalid")
-        if check.outcome == "throttled":
-            return self._error_page(429, locked_message(check.retry_after_s))
-        if check.outcome == "unavailable":
-            return self._error_page(503, UNAVAILABLE)
-        if check.outcome == "ok" and self._enrolled(check.user_id):
-            self._deps.provider.update_txn(txn_id, stage="second_factor", user_id=check.user_id,
-                                           username=check.username)
-            return self._redirect(_second_factor_url(txn_id))
-        self._deps.throttle.record_failure(username, "password")
-        alive = self._deps.provider.fail_txn(txn_id)
-        self._deps.audit.record("login_failed", username=username,
-                                reason="not_enrolled" if check.outcome == "ok" else "invalid")
-        if alive:
-            return self._page(SIGN_IN_TITLE, login_password_html(txn_id, username=username, error=FAILED), 401)
-        return self._page(SIGN_IN_TITLE, message_html(FAILED, error=True), 401)
 
     async def second_factor_page(self, request: Request) -> Response:
         """GET /login/second?txn=: the passkey button and the TOTP form."""
@@ -189,17 +213,16 @@ class _LoginPages:
         except _Refused as refused:
             return self._json({"error": refused.message}, refused.status)
         credential = body.get("credential")
-        challenge = self._spend_challenge(txn)
-        verified = (challenge is not None and isinstance(credential, dict)
-                    and self._deps.passkeys.verify_authentication(txn.user_id, credential, challenge))
-        if not verified:
-            self._second_factor_failed(txn_id, txn, "passkey")
-            return self._json({"error": FAILED}, 401)
         try:
-            redirect = self._complete(request, txn_id, txn, "passkey")
+            async with self._turn(request, txn_id, "second_factor", txn.username) as txn:
+                challenge = self._spend_challenge(txn)
+                if (challenge is not None and isinstance(credential, dict)
+                        and self._deps.passkeys.verify_authentication(txn.user_id, credential, challenge)):
+                    return self._json({"redirect": self._complete(request, txn_id, txn, "passkey")})
+                self._second_factor_failed(txn_id, txn, "passkey")
         except _Refused as refused:
             return self._json({"error": refused.message}, refused.status)
-        return self._json({"redirect": redirect})
+        return self._json({"error": FAILED}, 401)
 
     async def totp(self, request: Request) -> Response:
         """POST /login/totp (txn, code): a 303 to Jarvis's callback with the code on success."""
@@ -207,23 +230,18 @@ class _LoginPages:
             return self._error_page(403, FOREIGN_ORIGIN)
         form = await request.form()
         txn_id = _field(form, "txn")
+        code = "".join(_field(form, "code").split())  # authenticator apps show "123 456"
         try:
             txn = self._txn(request, txn_id, "second_factor")
-            self._check_lockout(txn.username)
+            async with self._turn(request, txn_id, "second_factor", txn.username) as txn:
+                if self._deps.totp.verify_and_consume(txn.user_id, code):
+                    return self._redirect(self._complete(request, txn_id, txn, "totp"))
+                alive = self._second_factor_failed(txn_id, txn, "totp")
         except _Refused as refused:
             return self._error_page(refused.status, refused.message)
-        code = "".join(_field(form, "code").split())  # authenticator apps show "123 456"
-        if not self._deps.totp.verify_and_consume(txn.user_id, code):
-            if self._second_factor_failed(txn_id, txn, "totp"):
-                body = login_second_factor_html(txn_id, txn.username, error=FAILED)
-            else:
-                body = message_html(FAILED, error=True)
-            return self._page(SECOND_FACTOR_TITLE, body, 401)
-        try:
-            redirect = self._complete(request, txn_id, txn, "totp")
-        except _Refused as refused:
-            return self._error_page(refused.status, refused.message)
-        return self._redirect(redirect)
+        if alive:
+            return self._page(SECOND_FACTOR_TITLE, login_second_factor_html(txn_id, txn.username, error=FAILED), 401)
+        return self._page(SECOND_FACTOR_TITLE, message_html(FAILED, error=True), 401)
 
     # --- Steps -----------------------------------------------------------------------------------
 
@@ -237,6 +255,46 @@ class _LoginPages:
         if txn.stage != stage:
             raise _Refused(400, WRONG_STEP)
         return txn
+
+    @contextlib.asynccontextmanager
+    async def _turn(self, request: Request, txn_id: Any, stage: str, username: str) -> AsyncIterator[LoginTxn]:
+        """An attempt's turn: username's lock held, the checks run again under it, one txn attempt reserved.
+
+        A locked-out username is turned away before it queues. The caller
+        settles the reservation, unless complete_login consumes the transaction.
+        """
+        self._check_lockout(username)
+        async with self._locks.hold(normalize_username(username)):
+            txn = self._txn(request, txn_id, stage)
+            self._check_lockout(username)
+            if not self._deps.provider.reserve_attempt(txn_id):
+                raise _Refused(400, EXPIRED)
+            yield txn
+
+    async def _check_password(self, txn_id: str, username: str, password: str) -> Response:
+        """The password step, inside the username's turn with its attempt reserved."""
+        if username and password:
+            check = await self._deps.api.verify_password(username, password)
+        else:
+            check = PasswordCheck("invalid")
+        if check.outcome == "throttled":
+            self._deps.provider.settle_attempt(txn_id, failed=False)
+            return self._error_page(429, locked_message(check.retry_after_s))
+        if check.outcome == "unavailable":
+            self._deps.provider.settle_attempt(txn_id, failed=False)
+            return self._error_page(503, UNAVAILABLE)
+        if check.outcome == "ok" and self._enrolled(check.user_id):
+            self._deps.provider.settle_attempt(txn_id, failed=False)
+            self._deps.provider.update_txn(txn_id, stage="second_factor", user_id=check.user_id,
+                                           username=check.username)
+            return self._redirect(_second_factor_url(txn_id))
+        self._deps.throttle.record_failure(username, "password")
+        alive = self._deps.provider.settle_attempt(txn_id, failed=True)
+        self._deps.audit.record("login_failed", username=username,
+                                reason="not_enrolled" if check.outcome == "ok" else "invalid")
+        if alive:
+            return self._page(SIGN_IN_TITLE, login_password_html(txn_id, username=username, error=FAILED), 401)
+        return self._page(SIGN_IN_TITLE, message_html(FAILED, error=True), 401)
 
     def _check_lockout(self, username: str) -> None:
         seconds = self._deps.throttle.check(username)
@@ -260,10 +318,10 @@ class _LoginPages:
             return challenge if spent.rowcount == 1 else None
 
     def _second_factor_failed(self, txn_id: str, txn: LoginTxn, kind: str) -> bool:
-        """Count a failed passkey or TOTP attempt; False once it has ended the transaction."""
+        """Record a failed passkey or TOTP attempt and settle its reservation; False once that ended the txn."""
         self._deps.throttle.record_failure(txn.username, kind)
         self._deps.audit.record(kind + "_failed", username=txn.username, user_id=txn.user_id)
-        return self._deps.provider.fail_txn(txn_id)
+        return self._deps.provider.settle_attempt(txn_id, failed=True)
 
     def _complete(self, request: Request, txn_id: str, txn: LoginTxn, method: str) -> str:
         """Trade the transaction for a code: Jarvis's callback URL. _Refused (400) if it ran out meanwhile."""

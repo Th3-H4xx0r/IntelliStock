@@ -530,6 +530,33 @@ async def test_fail_txn_deletes_at_max(client, provider, settings):
     assert provider.fail_txn(txn_id) is False
 
 
+async def test_reserved_attempts_cap_concurrent_attempts(client, provider, settings, clock):
+    txn_id, _ = await _start_login(client, settings)
+    # Five attempts in flight at once fill the transaction; a sixth is refused before it starts.
+    assert [provider.reserve_attempt(txn_id) for _ in range(6)] == [True] * 5 + [False]
+    assert provider.get_txn(txn_id).attempts == 5
+    # An outcome that is nobody's failure gives its attempt back.
+    assert provider.settle_attempt(txn_id, failed=False) is True
+    assert provider.get_txn(txn_id).attempts == 4
+    assert provider.reserve_attempt(txn_id) is True
+    # A failure keeps its count; one that lands with five counted ends the transaction.
+    assert provider.settle_attempt(txn_id, failed=True) is False
+    assert provider.get_txn(txn_id) is None
+    assert provider.reserve_attempt(txn_id) is False
+    assert provider.settle_attempt(txn_id, failed=False) is False
+
+    other_txn, _ = await _start_login(client, settings)
+    assert provider.settle_attempt(other_txn, failed=False) is True  # nothing reserved: the count stays at 0
+    assert provider.get_txn(other_txn).attempts == 0
+    assert provider.reserve_attempt(other_txn) is True
+    assert provider.settle_attempt(other_txn, failed=True) is True
+    assert provider.get_txn(other_txn).attempts == 1
+    clock.advance(LOGIN_TXN_TTL_S)
+    assert provider.reserve_attempt(other_txn) is False
+    assert provider.settle_attempt(other_txn, failed=True) is False
+    assert provider.reserve_attempt("not-a-txn") is False
+
+
 async def test_complete_login_needs_password_stage_and_is_single_use(client, provider, settings, db):
     txn_id, _ = await _start_login(client, settings)
     with pytest.raises(LookupError):   # the password step has not passed
