@@ -40,6 +40,14 @@ from llm_utils import (
     normalize_reasoning_effort,
     resolve_api_key_for_provider,
 )
+from llm_url_policy import (
+    ROW_BASE_URL_FIELD,
+    BaseUrlInvalid,
+    BaseUrlNotAllowed,
+    guard_key_for_base_url,
+    is_allowed_base_url,
+    parse_base_url,
+)
 from db import pool as db_pool
 from db import store as db_store
 from db.store import P as _Pred
@@ -1906,6 +1914,39 @@ def api_status(conn=Depends(conn_dependency), current_user: dict = Depends(get_c
     return _run(action_status, conn)
 
 
+_HIDDEN_LLM_TEST_ERROR = (
+    "LLM connectivity test failed. Details are hidden because the base URL is not on the "
+    "allowlist; the API log has them."
+)
+_HIDDEN_SMOKE_ERROR = "Smoke generation failed. Details are hidden because the base URL is not on the allowlist."
+
+
+def _llm_test_key(conn, body: LlmConfigTestBody, provider: str) -> tuple[str, str, dict | None]:
+    """The key /llm/test uses, where it came from, and the saved row it read.
+
+    Returns ``(key, source, saved_row)``; source is "caller", "saved" or "env",
+    as llm_url_policy.guard_key_for_base_url reads it. When editing a saved
+    model, the key field is blank or shows the masked value ("ABSK****xxxx"):
+    with a model_id the stored key is reused, so the user can test without
+    re-entering it. A submitted key wins only when it's a real new value; a
+    masked one without a model_id is sent as typed (it is not a secret). An
+    empty key falls back to the provider's environment variable.
+    """
+    submitted = str(body.api_key or "").strip()
+    if submitted and (not _looks_masked(submitted) or not body.model_id):
+        return submitted, "caller", None
+    row = None
+    if body.model_id:
+        try:
+            row = action_get_model_raw(conn, str(body.model_id))
+        except Exception:
+            row = None
+        saved = str((row or {}).get("api_key") or "").strip()
+        if saved:
+            return saved, "saved", row
+    return resolve_api_key_for_provider(provider, ""), "env", row
+
+
 @app.post("/llm/test", response_class=JSONResponse)
 def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     provider = str(body.provider or "").strip().lower()
@@ -1915,19 +1956,27 @@ def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), 
     if not model:
         raise HTTPException(status_code=400, detail="LLM model or deployment name is required")
 
-    # When editing a saved model, the key field is blank or shows the masked
-    # value ("ABSK****xxxx") — reuse the stored key so the user can test without
-    # re-entering it. The submitted key wins only when it's a real new value.
-    submitted_key = str(body.api_key or "").strip()
-    effective_key = submitted_key
-    if (not submitted_key or _looks_masked(submitted_key)) and body.model_id:
+    # A caller-supplied base URL must parse, and a saved or server key never
+    # goes to a host llm_url_policy does not allow. Both checks run before any
+    # LLM call.
+    _url_field = ROW_BASE_URL_FIELD.get(provider)
+    caller_url = str(getattr(body, _url_field) or "").strip() if _url_field else ""
+    caller_host = ""
+    if caller_url:
         try:
-            _saved = action_get_model_raw(conn, str(body.model_id))
-            effective_key = str((_saved or {}).get("api_key") or "").strip()
-        except Exception:
-            effective_key = ""
+            caller_host = parse_base_url(caller_url)[1]
+        except BaseUrlInvalid as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    key, key_source, saved_row = _llm_test_key(conn, body, provider)
+    try:
+        api_key = guard_key_for_base_url(
+            provider, key=key, source=key_source, caller_base_url=caller_url, saved_row=saved_row)
+    except BaseUrlNotAllowed as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # Error text from a host the policy does not allow could map a private
+    # network, so it reaches the response only for allowed hosts.
+    verbose = not caller_url or is_allowed_base_url(provider, caller_url, saved_row=saved_row)
 
-    api_key = resolve_api_key_for_provider(provider, effective_key)
     # Local Ollama legitimately has no api_key — only Ollama Cloud needs
     # a Bearer token. Every other provider still requires a key here.
     if not api_key and provider != "ollama":
@@ -1937,6 +1986,10 @@ def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), 
         )
 
     provider_config = _build_llm_test_provider_config(body)
+    if provider == "ollama":
+        # api_key is already resolved (and may have been withheld above), so the
+        # ollama SDK must not attach OLLAMA_API_KEY on its own.
+        provider_config["ollama_allow_ambient_key"] = False
     # Size the test's output budget to the EFFECTIVE reasoning effort. Reasoning
     # lives in a provider-specific field (bedrock_reasoning / ollama_think), not
     # always reasoning_effort — and reasoning models (e.g. gpt-oss) spend output
@@ -1989,6 +2042,11 @@ def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), 
     meta = get_last_structured_llm_call_metadata()
     if result is None:
         detail = str(meta.get("error") or "").strip() or "LLM connectivity test failed."
+        if not verbose:
+            import logging
+            logging.getLogger("uvicorn.error").warning(
+                "LLM test for %s at unlisted host %r failed: %r", provider, caller_host, detail)
+            detail = _HIDDEN_LLM_TEST_ERROR
         raise HTTPException(status_code=400, detail=detail)
     try:
         _result_payload = result.dict() if hasattr(result, "dict") else dict(result)
@@ -2043,6 +2101,12 @@ def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), 
             _smoke_error = (get_last_plain_llm_call_error() or "")[:512]
         except Exception:
             pass
+    if _smoke_error and not verbose:
+        import logging
+        logging.getLogger("uvicorn.error").warning(
+            "LLM test smoke generation for %s at unlisted host %r failed: %r",
+            provider, caller_host, _smoke_error)
+        _smoke_error = _HIDDEN_SMOKE_ERROR
 
     # For Ollama, surface the content/thinking split from the smoke call
     # so reasoning text doesn't get mixed into the visible response. Other
