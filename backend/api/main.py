@@ -4975,13 +4975,15 @@ def api_nexus_config_set(instance_id: str, body: NexusConfigUpdateBody, conn=Dep
 
 # ── Brokerage Accounts ─────────────────────────────────────────────────────────
 
-@app.get("/brokerages", response_class=JSONResponse)
+@app.get("/brokerages", response_class=JSONResponse,
+         operation_id="list_brokerages", openapi_extra=mcp_policy("read"))
 def api_list_brokerages(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """List all linked brokerage accounts (credentials masked)."""
     return _run(action_list_brokerages, conn)
 
 
-@app.post("/brokerages", response_class=JSONResponse)
+@app.post("/brokerages", response_class=JSONResponse,
+          operation_id="link_brokerage", openapi_extra=mcp_policy("irreversible"))
 def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Link a supported brokerage account after validating its credentials."""
     if body.brokerage_type == "alpaca":
@@ -5042,7 +5044,8 @@ def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), c
     raise HTTPException(status_code=400, detail="unsupported brokerage type")
 
 
-@app.put("/brokerages/{brokerage_id}", response_class=JSONResponse)
+@app.put("/brokerages/{brokerage_id}", response_class=JSONResponse,
+         operation_id="update_brokerage", openapi_extra=mcp_policy("irreversible"))
 def api_update_brokerage(brokerage_id: str, body: UpdateBrokerageBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Update a linked brokerage account's name and/or credentials."""
     return _run(action_update_brokerage, conn, brokerage_id,
@@ -5050,7 +5053,8 @@ def api_update_brokerage(brokerage_id: str, body: UpdateBrokerageBody, conn=Depe
                 alpaca_data_feed=body.alpaca_data_feed)
 
 
-@app.delete("/brokerages/{brokerage_id}", response_class=JSONResponse)
+@app.delete("/brokerages/{brokerage_id}", response_class=JSONResponse,
+            operation_id="delete_brokerage", openapi_extra=mcp_policy("irreversible"))
 def api_delete_brokerage(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Remove a linked brokerage account."""
     return _run(action_delete_brokerage, conn, brokerage_id)
@@ -5071,7 +5075,8 @@ class TestAlpacaBody(BaseModel):
     alpaca_data_feed: Optional[str] = Field(default=None, pattern="^(iex|sip)$")
 
 
-@app.post("/brokerages/test-alpaca", response_class=JSONResponse)
+@app.post("/brokerages/test-alpaca", response_class=JSONResponse,
+          operation_id="test_alpaca_brokerage", openapi_extra=mcp_policy("never"))
 def api_test_alpaca_brokerage(
     body: TestAlpacaBody,
     conn=Depends(conn_dependency),
@@ -5152,14 +5157,16 @@ def api_test_alpaca_brokerage(
         raise HTTPException(status_code=500, detail=f"Alpaca test suite error: {type(e).__name__}: {e}")
 
 
-@app.post("/brokerages/ensure-ai-alpaca", response_class=JSONResponse)
+@app.post("/brokerages/ensure-ai-alpaca", response_class=JSONResponse,
+          operation_id="ensure_ai_alpaca", openapi_extra=mcp_policy("irreversible"))
 def api_ensure_ai_alpaca(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Create (or find) an Alpaca brokerage for the AI engine using env vars. Returns brokerage_id."""
     brokerage_id = action_ensure_ai_alpaca_brokerage(conn)
     return {"brokerage_id": brokerage_id}
 
 
-@app.get("/brokerages/{brokerage_id}/portfolio-history", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/portfolio-history", response_class=JSONResponse,
+         operation_id="portfolio_history", openapi_extra=mcp_policy("read"))
 def api_portfolio_history(
     brokerage_id: str,
     range: Optional[str] = "1M",
@@ -5230,7 +5237,8 @@ def _fetch_direct_alpaca_positions(brokerage_id: str) -> tuple[float | None, lis
     return cash, normalize_alpaca_positions(positions.json())
 
 
-@app.get("/brokerages/{brokerage_id}/positions", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/positions", response_class=JSONResponse,
+         operation_id="get_positions", openapi_extra=mcp_policy("read", tool="get_positions"))
 def api_brokerage_positions(
     brokerage_id: str,
     conn=Depends(conn_dependency),
@@ -5310,7 +5318,8 @@ _HOLDING_OPENS_CACHE: dict = {}
 _HOLDING_OPENS_TTL = 600.0  # seconds
 
 
-@app.get("/brokerages/{brokerage_id}/holding-opens", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/holding-opens", response_class=JSONResponse,
+         operation_id="brokerage_holding_opens", openapi_extra=mcp_policy("read"))
 def api_brokerage_holding_opens(
     brokerage_id: str,
     conn=Depends(conn_dependency),
@@ -5467,7 +5476,8 @@ def api_brokerage_holding_opens(
     return {"opens": opens, "_meta": meta}
 
 
-@app.get("/brokerages/{brokerage_id}/orders", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/orders", response_class=JSONResponse,
+         operation_id="get_orders", openapi_extra=mcp_policy("read", tool="get_orders"))
 def api_brokerage_orders(
     brokerage_id: str,
     symbol: str = "",
@@ -5598,7 +5608,8 @@ def _fetch_alpaca_order_book(row: dict, recent_limit: int) -> tuple[list[dict], 
     return open_orders, recent[:recent_limit]
 
 
-@app.get("/brokerages/{brokerage_id}/order-book", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/order-book", response_class=JSONResponse,
+         operation_id="brokerage_order_book", openapi_extra=mcp_policy("read"))
 def api_brokerage_order_book(
     brokerage_id: str,
     recent_limit: int = 25,
@@ -5838,7 +5849,9 @@ def _manual_order_brokerage(brokerage_id: str) -> dict:
     return row
 
 
-@app.post("/brokerages/{brokerage_id}/orders", response_class=JSONResponse)
+@app.post("/brokerages/{brokerage_id}/orders", response_class=JSONResponse,
+          operation_id="brokerage_place_order",
+          openapi_extra=mcp_policy("money", target={"brokerage": "brokerage_id"}))
 def api_brokerage_place_order(
     brokerage_id: str,
     body: Any = Body(default=None),
@@ -5894,7 +5907,8 @@ def api_brokerage_place_order(
     return {"brokerage_id": brokerage_id, "order": placed[0]}
 
 
-@app.delete("/brokerages/{brokerage_id}/orders/{order_id}", response_class=JSONResponse)
+@app.delete("/brokerages/{brokerage_id}/orders/{order_id}", response_class=JSONResponse,
+            operation_id="brokerage_cancel_order", openapi_extra=mcp_policy("irreversible"))
 def api_brokerage_cancel_order(
     brokerage_id: str,
     order_id: str,
@@ -5930,7 +5944,8 @@ def api_brokerage_cancel_order(
     return {"brokerage_id": brokerage_id, "order_id": order_id, "canceled": True}
 
 
-@app.get("/brokerages/{brokerage_id}/bot-activity", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/bot-activity", response_class=JSONResponse,
+         operation_id="brokerage_bot_activity", openapi_extra=mcp_policy("read"))
 def api_brokerage_bot_activity(
     brokerage_id: str,
     symbol: str = "",
@@ -6001,7 +6016,8 @@ def _resolve_instance_for_brokerage(conn, brokerage_id):
     return resolved
 
 
-@app.get("/brokerages/{brokerage_id}/discovered", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/discovered", response_class=JSONResponse,
+         operation_id="brokerage_discovered", openapi_extra=mcp_policy("read"))
 def api_brokerage_discovered(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Discover-engine opportunities for the instance behind this account
     (active only, newest first). Empty when no instance is linked."""
@@ -6011,7 +6027,8 @@ def api_brokerage_discovered(brokerage_id: str, conn=Depends(conn_dependency), c
     return _run(action_list_discovered_stocks, conn, iid, "active", True)
 
 
-@app.get("/brokerages/{brokerage_id}/trends", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/trends", response_class=JSONResponse,
+         operation_id="brokerage_trends", openapi_extra=mcp_policy("read"))
 def api_brokerage_trends(brokerage_id: str, status: str = "active", limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Detected market trends for the instance behind this account. `status` is
     one of active|weakening|ended (default active). Empty when no instance is
@@ -6061,7 +6078,8 @@ def _kalshi_rows(conn, table: str, brokerage_id: str) -> list:
         return []  # table may not exist yet / transient outage -> empty
 
 
-@app.get("/brokerages/{brokerage_id}/kalshi/portfolio", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/kalshi/portfolio", response_class=JSONResponse,
+         operation_id="kalshi_portfolio", openapi_extra=mcp_policy("read"))
 def api_kalshi_portfolio(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Account value + equity curve for a Kalshi brokerage. Live balance + DB
     snapshot series. Read-only."""
@@ -6089,8 +6107,10 @@ def api_kalshi_portfolio(brokerage_id: str, conn=Depends(conn_dependency), curre
                              show_paper=_kalshi_brokerage_show_paper(conn, brokerage_id))
 
 
-@app.get("/brokerages/{brokerage_id}/kalshi/positions", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/kalshi/positions", response_class=JSONResponse,
+         operation_id="kalshi_positions", openapi_extra=mcp_policy("read"))
 def api_kalshi_positions(brokerage_id: str, request: Request, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the Kalshi account's open positions with cost, value, odds and readable match names."""
     from kalshi.api_payloads import positions_payload
     from kalshi.data.ticker_names import parse_market_ticker
     row = _kalshi_brokerage_row(conn, brokerage_id)
@@ -6122,22 +6142,28 @@ def api_kalshi_positions(brokerage_id: str, request: Request, conn=Depends(conn_
     return _proxy_logos(positions_payload(positions, info_fn=_pinfo), _public_base_url(request))
 
 
-@app.get("/brokerages/{brokerage_id}/kalshi/edges", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/kalshi/edges", response_class=JSONResponse,
+         operation_id="kalshi_edges", openapi_extra=mcp_policy("read"))
 def api_kalshi_edges(brokerage_id: str, limit: int = 10, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the Kalshi account's top mispriced contracts (Edge Radar), strongest edge first."""
     from kalshi.api_payloads import edges_payload
     _kalshi_brokerage_row(conn, brokerage_id)
     return edges_payload(_kalshi_rows(conn, "kalshi_edges", brokerage_id), limit=max(1, min(int(limit or 10), 50)))
 
 
-@app.get("/brokerages/{brokerage_id}/kalshi/clv", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/kalshi/clv", response_class=JSONResponse,
+         operation_id="kalshi_clv", openapi_extra=mcp_policy("read"))
 def api_kalshi_clv(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the Kalshi account's closing-line value, overall and per league."""
     from kalshi.api_payloads import clv_payload
     _kalshi_brokerage_row(conn, brokerage_id)
     return clv_payload(_kalshi_rows(conn, "kalshi_clv_log", brokerage_id))
 
 
-@app.get("/brokerages/{brokerage_id}/kalshi/settlement", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/kalshi/settlement", response_class=JSONResponse,
+         operation_id="kalshi_settlement", openapi_extra=mcp_policy("read"))
 def api_kalshi_settlement(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the Kalshi account's open positions with cost basis and max settlement payout."""
     from kalshi.api_payloads import positions_payload
     row = _kalshi_brokerage_row(conn, brokerage_id)
     try:
@@ -6147,8 +6173,10 @@ def api_kalshi_settlement(brokerage_id: str, conn=Depends(conn_dependency), curr
     return positions_payload(positions)
 
 
-@app.get("/brokerages/{brokerage_id}/kalshi/fills", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/kalshi/fills", response_class=JSONResponse,
+         operation_id="kalshi_fills", openapi_extra=mcp_policy("read"))
 def api_kalshi_fills(brokerage_id: str, limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the Kalshi account's recent fills from the live API (up to 200; empty on error)."""
     row = _kalshi_brokerage_row(conn, brokerage_id)
     try:
         fills = [f.__dict__ for f in _kalshi_client_from_row(row).get_fills(limit=max(1, min(int(limit or 50), 200)))]
@@ -6157,8 +6185,10 @@ def api_kalshi_fills(brokerage_id: str, limit: int = 50, conn=Depends(conn_depen
     return {"fills": fills, "count": len(fills)}
 
 
-@app.get("/brokerages/{brokerage_id}/kalshi/scan-budget", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/kalshi/scan-budget", response_class=JSONResponse,
+         operation_id="kalshi_scan_budget", openapi_extra=mcp_policy("read"))
 def api_kalshi_scan_budget(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return this month's Kalshi fixture-scan budget: used, limit, remaining and fixtures per day."""
     import datetime, calendar
     from kalshi.api_payloads import scan_budget_payload
     from kalshi.db import scan_budget_window
@@ -6175,7 +6205,8 @@ def api_kalshi_scan_budget(brokerage_id: str, conn=Depends(conn_dependency), cur
     return scan_budget_payload(used, days_left_in_month=days_left)
 
 
-@app.get("/brokerages/{brokerage_id}/kalshi/instances/{instance_id}/model", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/kalshi/instances/{instance_id}/model", response_class=JSONResponse,
+         operation_id="kalshi_instance_model", openapi_extra=mcp_policy("read"))
 def api_kalshi_instance_model(brokerage_id: str, instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Champion calibrator for an instance (self-improving training loop): method,
     sample count, held-out raw-vs-calibrated log-loss/Brier, and reliability points
@@ -6205,7 +6236,8 @@ def api_kalshi_instance_model(brokerage_id: str, instance_id: str, conn=Depends(
     return {"champion": calib, "model": model_out}
 
 
-@app.post("/brokerages/{brokerage_id}/kalshi/kill", response_class=JSONResponse)
+@app.post("/brokerages/{brokerage_id}/kalshi/kill", response_class=JSONResponse,
+          operation_id="kalshi_kill", openapi_extra=mcp_policy("money", target={"brokerage": "brokerage_id"}))
 def api_kalshi_kill(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """KILL: stop the instance bound to this Kalshi account and cancel its
     resting orders. Scoped to the linked instance (fail-safe). If no instance is
@@ -6278,7 +6310,8 @@ class UpdateKalshiInstanceBody(CreateKalshiInstanceBody):
     pass
 
 
-@app.get("/brokerages/{brokerage_id}/kalshi/instances", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/kalshi/instances", response_class=JSONResponse,
+         operation_id="kalshi_list_instances", openapi_extra=mcp_policy("read"))
 def api_kalshi_list_instances(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Kalshi bots bound to this brokerage (kind='kalshi'). Powers the Kalshi
     tab's instance-awareness: no rows -> prompt to create one."""
@@ -6301,7 +6334,9 @@ def api_kalshi_list_instances(brokerage_id: str, conn=Depends(conn_dependency), 
     return {"instances": out, "count": len(out)}
 
 
-@app.post("/brokerages/{brokerage_id}/kalshi/instances", response_class=JSONResponse)
+@app.post("/brokerages/{brokerage_id}/kalshi/instances", response_class=JSONResponse,
+          operation_id="kalshi_create_instance",
+          openapi_extra=mcp_policy("money", target={"brokerage": "brokerage_id"}))
 def api_kalshi_create_instance(brokerage_id: str, body: CreateKalshiInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Create a Kalshi trading instance bound to this brokerage. live execution
     is ON at creation when the brokerage is a LIVE account (user choice)."""
@@ -6327,7 +6362,9 @@ def api_kalshi_create_instance(brokerage_id: str, body: CreateKalshiInstanceBody
     return {"ok": True, "id": iid, "name": doc["name"], "live_enabled": live_enabled, "paper_mode": paper, "running": False}
 
 
-@app.patch("/instances/{instance_id}/kalshi/config", response_class=JSONResponse)
+@app.patch("/instances/{instance_id}/kalshi/config", response_class=JSONResponse,
+           operation_id="kalshi_update_instance",
+           openapi_extra=mcp_policy("money", target={"instance": "instance_id"}))
 def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Edit a Kalshi instance's name + config (risk tier, leagues, caps, model).
     live_enabled is re-derived from the linked brokerage's environment."""
@@ -6370,7 +6407,8 @@ def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody,
 
 # --- Kalshi backtests -----------------------------------------------------
 
-@app.post("/brokerages/{brokerage_id}/kalshi/backtests", response_class=JSONResponse)
+@app.post("/brokerages/{brokerage_id}/kalshi/backtests", response_class=JSONResponse,
+          operation_id="kalshi_create_backtest", openapi_extra=mcp_policy("write", cost=True))
 def api_kalshi_create_backtest(brokerage_id: str, body: KalshiBacktestBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Enqueue a Kalshi soccer backtest over the chosen leagues/date range with
     the given tuning config. A background worker picks up the pending row."""
@@ -6419,15 +6457,19 @@ def api_kalshi_create_backtest(brokerage_id: str, body: KalshiBacktestBody, conn
     return {"ok": True, "id": jid}
 
 
-@app.get("/brokerages/{brokerage_id}/kalshi/backtests", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/kalshi/backtests", response_class=JSONResponse,
+         operation_id="kalshi_list_backtests", openapi_extra=mcp_policy("read"))
 def api_kalshi_list_backtests(brokerage_id: str, limit: int = 100, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the Kalshi backtests run for this brokerage, up to 500."""
     _kalshi_brokerage_row(conn, brokerage_id)
     from kalshi import db as kdb
     return {"backtests": kdb.list_backtests(conn, brokerage_id, limit=max(1, min(int(limit or 100), 500)))}
 
 
-@app.get("/kalshi/backtests/{backtest_id}/status", response_class=JSONResponse)
+@app.get("/kalshi/backtests/{backtest_id}/status", response_class=JSONResponse,
+         operation_id="kalshi_backtest_status", openapi_extra=mcp_policy("read"))
 def api_kalshi_backtest_status(backtest_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return a Kalshi backtest's status, progress, summary, error, leagues and date range."""
     from kalshi import db as kdb
     row = kdb.get_backtest(conn, backtest_id)
     if not row:
@@ -6441,8 +6483,10 @@ def api_kalshi_backtest_status(backtest_id: str, conn=Depends(conn_dependency), 
     }
 
 
-@app.get("/kalshi/backtests/{backtest_id}/results", response_class=JSONResponse)
+@app.get("/kalshi/backtests/{backtest_id}/results", response_class=JSONResponse,
+         operation_id="kalshi_backtest_results", openapi_extra=mcp_policy("read"))
 def api_kalshi_backtest_results(backtest_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return a Kalshi backtest's status, summary, timings and its stored result."""
     from kalshi import db as kdb
     row = kdb.get_backtest(conn, backtest_id)
     if not row:
@@ -6454,8 +6498,10 @@ def api_kalshi_backtest_results(backtest_id: str, conn=Depends(conn_dependency),
             "result": kdb.get_backtest_result(conn, backtest_id)}
 
 
-@app.post("/kalshi/backtests/{backtest_id}/stop", response_class=JSONResponse)
+@app.post("/kalshi/backtests/{backtest_id}/stop", response_class=JSONResponse,
+          operation_id="kalshi_backtest_stop", openapi_extra=mcp_policy("write"))
 def api_kalshi_backtest_stop(backtest_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Stop a Kalshi backtest by clearing its run flag."""
     from kalshi import db as kdb
     if not kdb.get_backtest(conn, backtest_id):
         raise HTTPException(status_code=404, detail="backtest not found")
@@ -6463,8 +6509,10 @@ def api_kalshi_backtest_stop(backtest_id: str, conn=Depends(conn_dependency), cu
     return {"ok": True, "id": backtest_id}
 
 
-@app.delete("/kalshi/backtests/{backtest_id}", response_class=JSONResponse)
+@app.delete("/kalshi/backtests/{backtest_id}", response_class=JSONResponse,
+            operation_id="kalshi_backtest_delete", openapi_extra=mcp_policy("irreversible"))
 def api_kalshi_backtest_delete(backtest_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Delete a Kalshi backtest and its stored results. Irreversible."""
     from kalshi import db as kdb
     kdb.delete_backtest(conn, backtest_id)
     return {"ok": True, "id": backtest_id}
@@ -6531,7 +6579,8 @@ def _kalshi_brokerage_show_paper(conn, brokerage_id: str) -> bool:
     return True
 
 
-@app.get("/instances/{instance_id}/kalshi/detail", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/kalshi/detail", response_class=JSONResponse,
+         operation_id="kalshi_instance_detail", openapi_extra=mcp_policy("read"))
 def api_kalshi_instance_detail(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Kalshi instance summary: config, run state, linked brokerage env."""
     row = _kalshi_instance_row(conn, instance_id)
@@ -6558,7 +6607,8 @@ def api_kalshi_instance_detail(instance_id: str, conn=Depends(conn_dependency), 
     }
 
 
-@app.get("/instances/{instance_id}/kalshi/decisions", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/kalshi/decisions", response_class=JSONResponse,
+         operation_id="kalshi_instance_decisions", openapi_extra=mcp_policy("read"))
 def api_kalshi_instance_decisions(instance_id: str, request: Request, limit: int = 100, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """The LLM-reasoned decision log for this instance (newest first), enriched
     with readable team names + crests (league-agnostic)."""
@@ -6702,7 +6752,8 @@ def _proxy_logos(obj, base_url: str):
     return obj
 
 
-@app.get("/instances/{instance_id}/kalshi/live", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/kalshi/live", response_class=JSONResponse,
+         operation_id="kalshi_instance_live", openapi_extra=mcp_policy("read"))
 def api_kalshi_instance_live(instance_id: str, request: Request, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Live in-match cards for this instance — current score (when matchable),
     market-implied probabilities, the latest detected event, a news snippet, and the
@@ -6763,7 +6814,8 @@ def _espn_live_board():
     return _ESPN_BOARD_CACHE["board"]
 
 
-@app.get("/instances/{instance_id}/kalshi/orders", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/kalshi/orders", response_class=JSONResponse,
+         operation_id="kalshi_instance_orders", openapi_extra=mcp_policy("read"))
 def api_kalshi_instance_orders(instance_id: str, request: Request, limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Orders for this instance — placed/pending (from the decision log) + filled
     (from the broker). Drives the pending/past-orders cards."""
@@ -6881,7 +6933,8 @@ def api_kalshi_instance_orders(instance_id: str, request: Request, limit: int = 
                          "mock_history": mock_history[:n]}, _public_base_url(request))
 
 
-@app.get("/instances/{instance_id}/kalshi/equity", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/kalshi/equity", response_class=JSONResponse,
+         operation_id="kalshi_instance_equity", openapi_extra=mcp_policy("read"))
 def api_kalshi_instance_equity(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Equity curve for the instance's brokerage (reuses portfolio snapshots)."""
     from kalshi.api_payloads import portfolio_payload
@@ -6907,7 +6960,8 @@ class TestKalshiBody(BaseModel):
     brokerage_id: Optional[str] = None
 
 
-@app.post("/brokerages/test-kalshi", response_class=JSONResponse)
+@app.post("/brokerages/test-kalshi", response_class=JSONResponse,
+          operation_id="test_kalshi_brokerage", openapi_extra=mcp_policy("never"))
 def api_test_kalshi_brokerage(body: TestKalshiBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Probe Kalshi creds against /portfolio/balance. Accepts raw creds (add
     mode) or a brokerage_id (edit mode, decrypts stored creds). Saves nothing."""
@@ -6930,7 +6984,8 @@ def api_test_kalshi_brokerage(body: TestKalshiBody, conn=Depends(conn_dependency
         return {"ok": False, "environment": env, "error": f"{type(e).__name__}: {e}"}
 
 
-@app.get("/market/news", response_class=JSONResponse)
+@app.get("/market/news", response_class=JSONResponse,
+         operation_id="get_market_news", openapi_extra=mcp_policy("read", tool="get_market_news"))
 def api_market_news(limit: int = 20, current_user: dict = Depends(get_current_user)):
     """Recent market/business headlines from Google News (no external key).
     Best-effort — returns an empty list on any failure."""
@@ -6958,7 +7013,8 @@ def api_market_news(limit: int = 20, current_user: dict = Depends(get_current_us
     return {"articles": out}
 
 
-@app.get("/brokerages/{brokerage_id}/movers", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/movers", response_class=JSONResponse,
+         operation_id="brokerage_movers", openapi_extra=mcp_policy("read"))
 def api_brokerage_movers(brokerage_id: str, top: int = 6, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Market gainers/losers from the account's Alpaca market-data screener.
     Empty on any failure or a non-Alpaca account. Read-only."""
@@ -7010,7 +7066,8 @@ def api_brokerage_movers(brokerage_id: str, top: int = 6, conn=Depends(conn_depe
         return empty
 
 
-@app.get("/brokerages/{brokerage_id}/nexus-momentum", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/nexus-momentum", response_class=JSONResponse,
+         operation_id="brokerage_nexus_momentum", openapi_extra=mcp_policy("read"))
 def api_brokerage_nexus_momentum(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """The nexus strategy's current top ranked momentum names for the instance
     behind this account. Empty unless that instance runs graph_nexus_analysis
@@ -7031,7 +7088,8 @@ def api_brokerage_nexus_momentum(brokerage_id: str, conn=Depends(conn_dependency
         return {"momentum": []}
 
 
-@app.get("/brokerages/{brokerage_id}/backfill-queue", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/backfill-queue", response_class=JSONResponse,
+         operation_id="brokerage_backfill_queue", openapi_extra=mcp_policy("read"))
 def api_brokerage_backfill_queue(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Pending buy candidates queued by the nexus strategy (read-only cache).
     Empty unless the instance runs graph_nexus_analysis."""
@@ -7050,7 +7108,8 @@ def api_brokerage_backfill_queue(brokerage_id: str, conn=Depends(conn_dependency
         return {"queue": [], "count": 0}
 
 
-@app.get("/brokerages/{brokerage_id}/momentum-watchlist", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/momentum-watchlist", response_class=JSONResponse,
+         operation_id="brokerage_momentum_watchlist", openapi_extra=mcp_policy("read"))
 def api_brokerage_momentum_watchlist(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Count + newest names in the nexus momentum watchlist (read-only cache).
     Count saturates at the persist cap (500). Empty unless momentum_watchlist_enabled."""
@@ -7067,7 +7126,8 @@ def api_brokerage_momentum_watchlist(brokerage_id: str, conn=Depends(conn_depend
         return {"count": 0, "newest": []}
 
 
-@app.get("/brokerages/{brokerage_id}/trade-contexts", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/trade-contexts", response_class=JSONResponse,
+         operation_id="brokerage_trade_contexts", openapi_extra=mcp_policy("read"))
 def api_brokerage_trade_contexts(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Latest per-symbol bot rationale for the instance behind this account.
     Empty when no instance is linked. Read-only."""
@@ -7077,7 +7137,8 @@ def api_brokerage_trade_contexts(brokerage_id: str, conn=Depends(conn_dependency
     return _run(action_nexus_trade_contexts, conn, iid, 40)
 
 
-@app.get("/brokerages/{brokerage_id}/nexus-outcomes", response_class=JSONResponse)
+@app.get("/brokerages/{brokerage_id}/nexus-outcomes", response_class=JSONResponse,
+         operation_id="brokerage_nexus_outcomes", openapi_extra=mcp_policy("read"))
 def api_brokerage_nexus_outcomes(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Signal->outcome scorecard (hit-rate) for the instance behind this account.
     Empty when no instance is linked. Read-only."""
@@ -7258,7 +7319,8 @@ def search_symbol_instruments(query: str, *, provider=None) -> list[dict]:
     return results
 
 
-@app.get("/symbols/search", response_class=JSONResponse)
+@app.get("/symbols/search", response_class=JSONResponse,
+         operation_id="symbol_search", openapi_extra=mcp_policy("read"))
 def api_symbol_search(q: str, current_user: dict = Depends(get_current_user)):
     """Search tradable stocks, ETFs, and cryptocurrencies by name or ticker."""
     try:
@@ -7269,7 +7331,8 @@ def api_symbol_search(q: str, current_user: dict = Depends(get_current_user)):
         return {"results": []}
 
 
-@app.get("/symbols/{symbol}/info", response_class=JSONResponse)
+@app.get("/symbols/{symbol}/info", response_class=JSONResponse,
+         operation_id="get_symbol_info", openapi_extra=mcp_policy("read", tool="get_symbol_info"))
 def api_symbol_info(symbol: str, current_user: dict = Depends(get_current_user)):
     """Display info/stats for a stock (via yfinance): name, sector, market cap,
     P/E, dividend yield, 52-week range, day stats, analyst recommendation +
@@ -7281,7 +7344,8 @@ def api_symbol_info(symbol: str, current_user: dict = Depends(get_current_user))
         return {"symbol": (symbol or "").upper()}
 
 
-@app.get("/symbol-historicals", response_class=JSONResponse)
+@app.get("/symbol-historicals", response_class=JSONResponse,
+         operation_id="get_symbol_historicals", openapi_extra=mcp_policy("read", tool="get_symbol_historicals"))
 def api_symbol_historicals(
     symbols: str,
     range: str = "1D",
@@ -7336,13 +7400,16 @@ def _move_analysis_call(fn, *args, **kwargs):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/analysis/settings", response_class=JSONResponse)
+@app.get("/analysis/settings", response_class=JSONResponse,
+         operation_id="move_analysis_settings", openapi_extra=mcp_policy("read"))
 def api_move_analysis_settings(current_user: dict = Depends(get_current_user)):
+    """Return the move-analysis settings (model, sigma, minimum move) and the models to choose from."""
     from move_analysis import service as _svc
     return _move_analysis_call(_svc.get_settings, db_store)
 
 
-@app.put("/analysis/settings", response_class=JSONResponse)
+@app.put("/analysis/settings", response_class=JSONResponse,
+         operation_id="move_analysis_put_settings", openapi_extra=mcp_policy("write"))
 def api_move_analysis_put_settings(body: MoveAnalysisSettingsBody, current_user: dict = Depends(get_current_user)):
     """Only the fields the client sent are changed, so a null model_id clears
     the model while an absent one leaves it alone."""
@@ -7354,7 +7421,8 @@ def api_move_analysis_put_settings(body: MoveAnalysisSettingsBody, current_user:
     return _move_analysis_call(_svc.put_settings, db_store, sent)
 
 
-@app.get("/analysis/moves", response_class=JSONResponse)
+@app.get("/analysis/moves", response_class=JSONResponse,
+         operation_id="move_analysis_moves", openapi_extra=mcp_policy("read"))
 def api_move_analysis_moves(symbol: str, range: str = "3M", current_user: dict = Depends(get_current_user)):
     """Daily bars split into market, sector and stock-specific parts, and the
     flagged days with whatever explanation is stored for them."""
@@ -7362,7 +7430,8 @@ def api_move_analysis_moves(symbol: str, range: str = "3M", current_user: dict =
     return _move_analysis_call(_svc.moves_payload, db_store, symbol, range)
 
 
-@app.post("/analysis/moves/explain", response_class=JSONResponse)
+@app.post("/analysis/moves/explain", response_class=JSONResponse,
+          operation_id="move_analysis_explain", openapi_extra=mcp_policy("write", cost=True))
 def api_move_analysis_explain(body: MoveExplainBody, current_user: dict = Depends(get_current_user)):
     """Queue explanations for a symbol's flagged days. Returns at once; the
     model runs in a background thread and clients poll /analysis/moves."""
@@ -7372,7 +7441,8 @@ def api_move_analysis_explain(body: MoveExplainBody, current_user: dict = Depend
         bool(body.force), brokerage_id=body.brokerage_id)
 
 
-@app.get("/analysis/portfolio", response_class=JSONResponse)
+@app.get("/analysis/portfolio", response_class=JSONResponse,
+         operation_id="move_analysis_portfolio", openapi_extra=mcp_policy("read"))
 def api_move_analysis_portfolio(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """The last finished session's move per holding of one account, as
     contributions split into market, sector and stock-specific parts."""

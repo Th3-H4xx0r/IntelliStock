@@ -3,9 +3,9 @@
 The policy on each decorator is the only list of what an MCP caller may do: the
 gate reads `openapi_extra["x-mcp"]` back through `validate_policy`, and the MCP
 server builds its tools from the operation_ids. These tests hold the annotations
-to the rules the gate relies on. They cover the route prefixes annotated so far
-(ANNOTATED_PREFIXES); a later batch widens the tuple, and the last one replaces
-the filter with every route.
+to the rules the gate relies on. They cover every APIRoute on the app, the
+app_updates router included, so a new route fails CI until its own decorator
+says what an MCP caller may do.
 """
 from __future__ import annotations
 
@@ -41,45 +41,38 @@ def _policy(route) -> dict | None:
     return validate_policy((getattr(route, "openapi_extra", None) or {}).get("x-mcp"))
 
 
-ANNOTATED_PREFIXES = ("/health", "/help", "/auth/", "/onboarding/", "/chatbot/", "/status", "/llm/",
-    "/llm-usage/", "/benzinga/", "/notification-preferences", "/push/", "/notifications/", "/tickers",
-    "/prices", "/history", "/app-updates/", "/ota/", "/codex/", "/claude/", "/admin/", "/ollama/",
-    "/bedrock/", "/openrouter/", "/kalshi/img", "/instances", "/live-commands/", "/config/", "/strategies",
-    "/models", "/widget/", "/nexus/config/", "/backtests", "/backtest-evidence/", "/trend-research/",
-    "/nexus-graph-builds", "/agent/", "/learning/", "/digest/", "/discover/", "/nexus/", "/trends", "/discovered")
-PENDING = ("/instances/{instance_id}/kalshi/",)   # path prefixes inside an annotated prefix that a later batch owns
-
-
-def _annotated():
-    return [r for r in _api_routes() if r.path.startswith(ANNOTATED_PREFIXES) and not r.path.startswith(PENDING or ("\0",))]
-
-
-def test_annotated_routes_have_valid_x_mcp():
-    bad = [f"{sorted(r.methods)} {r.path}" for r in _annotated() if _policy(r) is None]
+def test_every_route_has_a_valid_x_mcp():
+    """The CI coverage gate: every route decides its MCP class at its own decorator."""
+    bad = [f"{m} {r.path}" for r in _api_routes() if _policy(r) is None for m in sorted(r.methods)]
     assert not bad, f"missing/invalid x-mcp (add openapi_extra=mcp_policy(...)): {bad}"
 
 
 def test_operation_ids_are_unique_snake_case_and_short():
-    ids = [r.operation_id for r in _annotated()]
+    ids = [r.operation_id for r in _api_routes()]
     assert all(i and NAME_RE.match(i) for i in ids) and len(ids) == len(set(ids))
 
 
 def test_tools_are_unique_and_known():
-    tools = [p["tool"] for p in map(_policy, _annotated()) if p and "tool" in p]
+    tools = [p["tool"] for p in map(_policy, _api_routes()) if p and "tool" in p]
     assert len(tools) == len(set(tools)) and set(tools) <= EXPECTED_DIRECT_TOOLS
 
 
+def test_direct_tools_are_exactly_the_expected_set():
+    tools = {p["tool"] for p in map(_policy, _api_routes()) if "tool" in p}
+    assert tools == EXPECTED_DIRECT_TOOLS
+
+
 def test_exposed_routes_have_a_description():
-    bare = [r.path for r in _annotated() if _policy(r)["class"] != "never" and not (r.description or "").strip()]
+    bare = [r.path for r in _api_routes() if _policy(r)["class"] != "never" and not (r.description or "").strip()]
     assert not bare
 
 
 def test_every_delete_is_irreversible_or_never():
-    assert all(_policy(r)["class"] in ("irreversible", "never") for r in _annotated() if "DELETE" in r.methods)
+    assert all(_policy(r)["class"] in ("irreversible", "never") for r in _api_routes() if "DELETE" in r.methods)
 
 
 def test_get_routes_are_read_or_never():
-    assert all(_policy(r)["class"] in ("read", "never") for r in _annotated() if r.methods == {"GET"})
+    assert all(_policy(r)["class"] in ("read", "never") for r in _api_routes() if r.methods == {"GET"})
 
 
 NEVER_PREFIXES = ("/auth/", "/codex/", "/claude/", "/admin/", "/ota/", "/chatbot/internal/", "/push/",
@@ -88,7 +81,7 @@ NEVER_PREFIXES = ("/auth/", "/codex/", "/claude/", "/admin/", "/ota/", "/chatbot
 
 
 def test_sensitive_routes_are_never():
-    assert all(_policy(r)["class"] == "never" for r in _annotated()
+    assert all(_policy(r)["class"] == "never" for r in _api_routes()
                if r.path.startswith(NEVER_PREFIXES) and not (r.path == "/llm/outputs/{output_id}" and r.methods == {"GET"}))
 
 
@@ -113,7 +106,7 @@ def _target_resolves(route) -> bool:
 
 
 def test_money_targets_resolve():
-    for r in _annotated():
+    for r in _api_routes():
         if _policy(r)["class"] == "money":
             assert _target_resolves(r), r.path
 
@@ -131,8 +124,7 @@ SPEC_LIVE_ROUTES = {   # spec §6 "money" list, as routes; each must stay gated
 def test_spec_named_live_routes_are_gated():
     by_key = {(m, r.path): _policy(r) for r in _api_routes() for m in r.methods}
     for key in SPEC_LIVE_ROUTES:
-        if key[1].startswith(ANNOTATED_PREFIXES):
-            assert by_key[key]["class"] in ("money", "irreversible"), key
+        assert by_key[key]["class"] in ("money", "irreversible"), key
 
 
 def test_model_writes_always_need_approval():          # lead ruling
@@ -146,7 +138,7 @@ def test_learning_control_always_needs_approval():     # lead ruling: it holds t
 
 
 def test_cost_routes_are_exactly_the_paid_work():
-    cost = {(m, r.path) for r in _annotated() for m in r.methods if _policy(r).get("cost")}
+    cost = {(m, r.path) for r in _api_routes() for m in r.methods if _policy(r).get("cost")}
     assert ("POST", "/backtests") in cost and ("POST", "/trend-research/jobs") in cost
     assert ("POST", "/backtests/{backtest_id}/stop") not in cost
 
