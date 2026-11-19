@@ -34,6 +34,7 @@ from chatbot.claude_cli_provider import (  # noqa: E402
     ClaudeCliRateLimitError,
     ClaudeCliSessionManager,
     ClaudeCliTimeoutError,
+    ClaudeCliToolPolicyError,
     ClaudeCliValidationError,
     SessionState,
     _build_chat_argv,
@@ -706,6 +707,66 @@ class TestSessionManagerErrors:
                 cli_path="claude",
                 extra_args=[],
             )
+
+
+# ── Session manager: built-in tool guard ───────────────────────────────────
+
+
+def _feed_after_write(fake_popen, events: List[Dict[str, Any]]) -> None:
+    """Feed ``events`` once the turn's user message is on stdin.
+
+    The turn slot is registered before the stdin write, so waiting for a
+    non-empty stdin guarantees a caller is waiting when the events land.
+    """
+    def _run():
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if fake_popen and fake_popen[-1].stdin.getvalue():
+                break
+            time.sleep(0.01)
+        for event in events:
+            fake_popen[-1].feed_event(event)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _send(manager) -> Dict[str, Any]:
+    return manager.send_turn(
+        conversation_id="conv-guard",
+        messages=[{"role": "user", "content": "hi"}],
+        system_prompt="sys",
+        model="claude-haiku-4-5",
+        cli_path="claude",
+        extra_args=[],
+    )
+
+
+def _init(tools):
+    return {"type": "system", "subtype": "init", "tools": tools}
+
+
+class TestBuiltinToolGuard:
+    def test_init_with_a_builtin_tool_refuses_the_session(self, fake_popen, manager):
+        _feed_after_write(fake_popen, [_init(["Bash", "mcp__intellistock__list_instances"])])
+        with pytest.raises(ClaudeCliToolPolicyError, match="Bash"):
+            _send(manager)
+        assert fake_popen[-1]._killed is True
+
+    def test_init_with_only_toolsearch_extra_is_refused(self, fake_popen, manager):
+        _feed_after_write(fake_popen, [_init(["ToolSearch", "mcp__intellistock__list_instances"])])
+        with pytest.raises(ClaudeCliToolPolicyError, match="ToolSearch"):
+            _send(manager)
+
+    @pytest.mark.parametrize("tools", [["mcp__intellistock__list_instances"], [], None])
+    def test_init_with_mcp_only_empty_or_missing_tools_is_accepted(self, fake_popen, manager, tools):
+        init = _init(tools) if tools is not None else {"type": "system", "subtype": "init"}
+        _feed_after_write(fake_popen, [init, _make_result("ok")])
+        assert _send(manager)["content"] == "ok"
+        assert fake_popen[-1]._killed is False
+
+    def test_builtin_tools_in_init_helper(self):
+        assert provider._builtin_tools_in_init(_init(["Read", "mcp__a__b", "Bash"])) == ["Bash", "Read"]
+        assert provider._builtin_tools_in_init({"type": "system", "subtype": "init", "tools": "Bash"}) == []
 
 
 class TestSessionManagerIdleSweep:

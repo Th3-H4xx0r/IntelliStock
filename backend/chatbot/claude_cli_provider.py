@@ -157,6 +157,12 @@ class ClaudeCliValidationError(ClaudeCliError):
     """Output JSON did not match the requested Pydantic schema."""
 
 
+class ClaudeCliToolPolicyError(ClaudeCliError):
+    """The session's ``system:init`` event listed a built-in (non-``mcp__``)
+    tool. Every spawn passes ``--tools ""``, so this means the flag
+    stopped working; the session is refused and killed. Not retried."""
+
+
 # ── extra_args whitelist ───────────────────────────────────────────────────
 
 # Flags users may set via the Models table's ``extra_args`` field. Each
@@ -1922,7 +1928,8 @@ class ClaudeCliSessionManager:
         """Dispatch one NDJSON event from CC's stdout.
 
         Relevant event types observed in CC 2.1.139:
-          - ``system`` / ``system:init``: subprocess ready
+          - ``system`` / ``system:init``: subprocess ready; its ``tools``
+            list is checked, and a built-in tool refuses the session
           - ``assistant``: partial / full assistant content
           - ``result``: terminal event for the current turn
           - ``error``: terminal error for the current turn
@@ -1942,7 +1949,24 @@ class ClaudeCliSessionManager:
             err_msg = str(event.get("message") or event.get("error") or "claude error")
             self._fail_pending(sess, ClaudeCliError(err_msg))
             return
-        # system / system:init / other framing events: nothing to do.
+        if etype == "system" and event.get("subtype") == "init":
+            # Fail closed: the image installs claude-code unpinned, so a CLI
+            # upgrade could make ``--tools ""`` stop removing built-ins.
+            conv = sess.conversation_id
+            tools = event.get("tools")
+            if isinstance(tools, list):
+                _log(f"[{conv[:8]}] CC init tools: {sorted(str(t) for t in tools)}", "cyan")
+            bad = _builtin_tools_in_init(event)
+            if bad:
+                _log(f"[{conv[:8]}] CC init lists built-in tools {bad}; refusing the session", "red")
+                self._fail_pending(sess, ClaudeCliToolPolicyError(
+                    f"claude-cli exposed built-in tools {bad}; session refused "
+                    "(only mcp__* tools are allowed)"
+                ))
+                sess.state = SessionState.CRASHED
+                self._kill_process(sess)
+            return
+        # system (other subtypes) / other framing events: nothing to do.
 
     def _deliver_result(
         self,
@@ -2296,6 +2320,16 @@ def _coerce_text(content: Any) -> str:
 def _extract_assistant_text(content: Any) -> str:
     """Same as _coerce_text but tailored for assistant message content."""
     return _coerce_text(content)
+
+
+def _builtin_tools_in_init(event: Dict[str, Any]) -> List[str]:
+    """Sorted names in a ``system:init`` event's ``tools`` that do not
+    start with ``mcp__`` (CC built-ins). ``[]`` when ``tools`` is missing
+    or not a list."""
+    tools = event.get("tools")
+    if not isinstance(tools, list):
+        return []
+    return sorted(str(t) for t in tools if not str(t).startswith("mcp__"))
 
 
 def _log(msg: str, color: str = "white") -> None:
@@ -3564,6 +3598,7 @@ __all__ = [
     "ClaudeCliTimeoutError",
     "ClaudeCliCrashError",
     "ClaudeCliValidationError",
+    "ClaudeCliToolPolicyError",
     "validate_extra_args",
     "call_claude_cli_chat",
     "call_claude_cli_structured",
