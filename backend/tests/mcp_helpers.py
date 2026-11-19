@@ -118,11 +118,13 @@ def IDEM() -> dict:  # noqa: N802 - reads as a constant at the call site: header
 
 
 def mcp_client(app, *, peer: str = PEER_IN, acting_user: str | None = "u-op",
-               client: str | None = "jarvis", token: str | None = MCP_TOKEN):
+               client: str | None = "jarvis", token: str | None = MCP_TOKEN,
+               raise_server_exceptions: bool = True):
     """A TestClient on the MCP listener (:8012) from socket peer 'peer'.
 
     Sends what the MCP server sends on every call; a header whose argument is
-    None is omitted.
+    None is omitted. raise_server_exceptions=False answers a route's exception
+    with the 500 a real client would see.
     """
     from fastapi.testclient import TestClient
 
@@ -133,6 +135,7 @@ def mcp_client(app, *, peer: str = PEER_IN, acting_user: str | None = "u-op",
         "X-MCP-Correlation-Id": str(uuid.uuid4()),
     }
     return TestClient(app, base_url="http://api:8012", client=(peer, 40000),
+                      raise_server_exceptions=raise_server_exceptions,
                       headers={k: v for k, v in headers.items() if v is not None})
 
 
@@ -150,8 +153,11 @@ def make_probe_app():
     Returns (app, calls). Each route counts its calls in calls["count"][operation_id]
     and records the body it received (calls["body"]) and its principal
     (calls["principal"]). Later tasks add routes here.
+
+    Money routes target the instance or brokerage in their path; the boom
+    routes raise RuntimeError and the refuse routes HTTPException(400, "nope").
     """
-    from fastapi import Body, Depends, FastAPI
+    from fastapi import Body, Depends, FastAPI, HTTPException
 
     from api import main, mcp_routes
     from api.mcp_gate import McpGateMiddleware
@@ -186,5 +192,68 @@ def make_probe_app():
     def probe_unannotated(user: dict = Depends(main.get_current_user)):
         hit("probe_unannotated", user)
         return {"ok": True}
+
+    instance_target = {"instance": "instance_id"}
+
+    @app.post("/probe/write", operation_id="probe_write", openapi_extra=mcp_policy("write"))
+    def probe_write(body: dict = Body(default=None), user: dict = Depends(main.get_current_user)):
+        hit("probe_write", user, body)
+        return body
+
+    @app.post("/probe/instances/{instance_id}/act", operation_id="probe_act",
+              openapi_extra=mcp_policy("money", target=instance_target))
+    def probe_act(instance_id: str, body: dict = Body(default=None),
+                  user: dict = Depends(main.get_current_user)):
+        hit("probe_act", user, body)
+        return {"instance_id": instance_id, "body": body}
+
+    @app.post("/probe/brokerages/{brokerage_id}/order", operation_id="probe_order",
+              openapi_extra=mcp_policy("money", target={"brokerage": "brokerage_id"}))
+    def probe_order(brokerage_id: str, body: dict = Body(default=None),
+                    user: dict = Depends(main.get_current_user)):
+        hit("probe_order", user, body)
+        return {"brokerage_id": brokerage_id, "body": body}
+
+    @app.post("/probe/cost", operation_id="probe_cost", openapi_extra=mcp_policy("write", cost=True))
+    def probe_cost(body: dict = Body(default=None), user: dict = Depends(main.get_current_user)):
+        hit("probe_cost", user, body)
+        return {"ok": True}
+
+    @app.delete("/probe/things/{thing_id}", operation_id="probe_delete",
+                openapi_extra=mcp_policy("irreversible"))
+    def probe_delete(thing_id: str, user: dict = Depends(main.get_current_user)):
+        hit("probe_delete", user)
+        return {"deleted": thing_id}
+
+    @app.post("/probe/boom", operation_id="probe_boom", openapi_extra=mcp_policy("write"))
+    def probe_boom(body: dict = Body(default=None), user: dict = Depends(main.get_current_user)):
+        hit("probe_boom", user, body)
+        raise RuntimeError("boom")
+
+    @app.post("/probe/refuse", operation_id="probe_refuse", openapi_extra=mcp_policy("write"))
+    def probe_refuse(body: dict = Body(default=None), user: dict = Depends(main.get_current_user)):
+        hit("probe_refuse", user, body)
+        raise HTTPException(status_code=400, detail="nope")
+
+    @app.post("/probe/backtests", operation_id="create_backtest",
+              openapi_extra=mcp_policy("write", cost=True))
+    def probe_create_backtest(body: dict = Body(default=None),
+                              user: dict = Depends(main.get_current_user)):
+        hit("create_backtest", user, body)
+        return {"ok": True}
+
+    @app.post("/probe/instances/{instance_id}/boom", operation_id="probe_act_boom",
+              openapi_extra=mcp_policy("money", target=instance_target))
+    def probe_act_boom(instance_id: str, body: dict = Body(default=None),
+                       user: dict = Depends(main.get_current_user)):
+        hit("probe_act_boom", user, body)
+        raise RuntimeError("boom")
+
+    @app.post("/probe/instances/{instance_id}/refuse", operation_id="probe_act_refuse",
+              openapi_extra=mcp_policy("money", target=instance_target))
+    def probe_act_refuse(instance_id: str, body: dict = Body(default=None),
+                         user: dict = Depends(main.get_current_user)):
+        hit("probe_act_refuse", user, body)
+        raise HTTPException(status_code=400, detail="nope")
 
     return app, calls

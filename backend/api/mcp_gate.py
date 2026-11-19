@@ -11,8 +11,12 @@ header:
 - On the MCP listener (MCP_API_PORT) it is the whole gate. The switch, the token,
   the raw socket peer and the acting user must all check out (anything else is a
   401), then the route's x-mcp policy decides (no policy or "never" is a 403).
-  An admitted call runs with the principal in the ASGI scope, where
-  ``main.get_current_user`` picks it up.
+  The body is then read whole (413 past MCP_MAX_BODY_BYTES; 415 unless it is
+  JSON sent as application/json), so the money decision, a held approval and
+  the route all see the same bytes. A money call on a live, unknown or
+  protected target, and every irreversible call, is held: a pending approval,
+  a push and a 202, and the route does not run. Anything else runs with the
+  principal in the ASGI scope, where ``main.get_current_user`` picks it up.
 
 The scope keys below are set only here, in-process; no header or request field
 can reach them. Every MCP-listener call except the service-level routes gets one
@@ -25,6 +29,7 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import json
 import logging
 import re
 import time
@@ -38,8 +43,11 @@ from starlette.routing import BaseRoute, Match
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 import auth_utils
+import mcp_approvals
 from mcp_audit import summarize_args, write_audit
-from mcp_policy import McpConfig, validate_policy
+from mcp_policy import (
+    McpConfig, approval_reason, canonical_request_sha256, resolve_money_state, validate_policy,
+)
 
 _log = logging.getLogger("uvicorn.error")
 
@@ -60,8 +68,15 @@ DEFAULT_CLIENT = "jarvis"
 CLIENT_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 _CORRELATION_ID_MAX = 128
 
+# Contract §2. Matched with fullmatch: `$` alone would accept a trailing newline.
+IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
 UNAUTHENTICATED_DETAIL = "mcp: unauthenticated"
 NOT_AVAILABLE_DETAIL = "mcp: operation not available"
+TOO_LARGE_DETAIL = "mcp: request body too large"
+JSON_REQUIRED_DETAIL = "mcp: JSON body required"
+# Audited for a client that hung up before its body was complete (nginx's code).
+CLIENT_CLOSED_STATUS = 499
 # What get_current_user answers for a token it cannot decode: the service token
 # on the public listener must look like any other bad bearer.
 _BAD_JWT_DETAIL = "Invalid or expired token"
@@ -164,6 +179,111 @@ def _client_header(scope: Scope) -> tuple[bool, str | None]:
     return (True, value) if CLIENT_RE.fullmatch(value) else (False, None)
 
 
+def _idempotency_key(scope: Scope) -> str | None:
+    """The one Idempotency-Key header when it is well formed, else None."""
+    values = _header_values(scope, b"idempotency-key")
+    if len(values) != 1:
+        return None
+    key = values[0].decode("latin-1")
+    return key if IDEMPOTENCY_KEY_RE.fullmatch(key) else None
+
+
+class _BodyTooLarge(Exception):
+    """The request body is over cfg.max_body_bytes, declared or received."""
+
+
+class _ClientGone(Exception):
+    """The client disconnected before its body was complete."""
+
+
+class _NotJson(Exception):
+    """A non-empty body that is not JSON sent as application/json."""
+
+
+def _declared_length(scope: Scope) -> int | None:
+    values = _header_values(scope, b"content-length")
+    if len(values) != 1 or not values[0].strip().isdigit():
+        return None
+    return int(values[0])
+
+
+async def _read_body(scope: Scope, receive: Receive, limit: int) -> bytes:
+    """The whole request body. _BodyTooLarge as soon as the declared length or
+    the bytes received pass `limit`; _ClientGone on a disconnect mid-body."""
+    declared = _declared_length(scope)
+    if declared is not None and declared > limit:
+        raise _BodyTooLarge()
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        message = await receive()
+        if message["type"] == "http.disconnect":
+            raise _ClientGone()
+        chunk = message.get("body", b"")
+        size += len(chunk)
+        if size > limit:
+            raise _BodyTooLarge()
+        chunks.append(chunk)
+        if not message.get("more_body", False):
+            return b"".join(chunks)
+
+
+def _reject_constant(name: str) -> object:
+    raise ValueError(f"{name} is not JSON")
+
+
+def _json_body(scope: Scope, body: bytes) -> object:
+    """The parsed body, or None for an empty one.
+
+    _NotJson unless the media type is application/json and the bytes parse.
+    NaN and Infinity are refused although Python reads them: they are not JSON,
+    so a held call carrying one could never be stored or re-hashed by the app.
+    """
+    if not body:
+        return None
+    values = _header_values(scope, b"content-type")
+    media_type = values[0].split(b";", 1)[0].strip().lower() if values else b""
+    if media_type != b"application/json":
+        raise _NotJson()
+    try:
+        return json.loads(body, parse_constant=_reject_constant)
+    except (ValueError, RecursionError) as exc:
+        raise _NotJson() from exc
+
+
+def _buffered_receive(body: bytes, receive: Receive) -> Receive:
+    """A receive that yields the buffered body as one http.request, then defers
+    to the real receive (for the disconnect)."""
+    delivered = False
+
+    async def buffered() -> Message:
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return await receive()
+
+    return buffered
+
+
+class _ResponseCapture:
+    """A send that forwards every message unchanged and notes the status and,
+    when keep_body, the body chunks."""
+
+    def __init__(self, send: Send, *, keep_body: bool) -> None:
+        self._send = send
+        self._keep_body = keep_body
+        self.status: int | None = None
+        self.body_chunks: list[bytes] = []
+
+    async def send(self, message: Message) -> None:
+        if message["type"] == "http.response.start":
+            self.status = message["status"]
+        elif message["type"] == "http.response.body" and self._keep_body:
+            self.body_chunks.append(message.get("body", b""))
+        await self._send(message)
+
+
 async def _acting_user(scope: Scope) -> dict | None:
     """The Users row named by the one X-MCP-Acting-User header, or None."""
     values = _header_values(scope, b"x-mcp-acting-user")
@@ -188,7 +308,9 @@ async def _respond(scope: Scope, receive: Receive, send: Send, status: int, deta
 
 async def _audit(scope: Scope, started: float, *, outcome: str, status: int,
                  principal: dict | None = None, client: str | None = None,
-                 operation_id: str | None = None) -> None:
+                 operation_id: str | None = None, **fields: object) -> None:
+    """Write the call's McpAudit row. `fields` adds columns or overrides the
+    defaults; args_summary defaults to the query alone."""
     row = {
         "outcome": outcome,
         "status": status,
@@ -201,8 +323,10 @@ async def _audit(scope: Scope, started: float, *, outcome: str, status: int,
         "username": principal["username"] if principal else None,
         "operation_id": operation_id,
         "correlation_id": _correlation_id(scope),
-        "args_summary": summarize_args(_query(scope), None),
+        **fields,
     }
+    if "args_summary" not in row:
+        row["args_summary"] = summarize_args(_query(scope), None)
     await run_in_threadpool(write_audit, row)
 
 
@@ -252,35 +376,80 @@ class McpGateMiddleware:
         principal = {"id": user.get("id"), "username": user.get("username"),
                      "via": "mcp", "client": client or DEFAULT_CLIENT}
 
-        route, _path_params = match_route(scope.get("app"), scope)
+        route, path_params = match_route(scope.get("app"), scope)
         policy = route_policy(route)
         operation_id = getattr(route, "operation_id", None)
         if policy is None or policy["class"] == "never":
-            await self._forbidden(scope, receive, send, started, principal, operation_id)
-            return
-        if policy["class"] != "read":
-            # TEMPORARY: Task 11 replaces this with the write/money/irreversible path.
-            await self._forbidden(scope, receive, send, started, principal, operation_id)
+            await self._refuse(scope, receive, send, started, principal, operation_id,
+                               status=403, detail=NOT_AVAILABLE_DETAIL, outcome="forbidden")
             return
 
-        scope[PRINCIPAL_SCOPE_KEY] = principal
-        status: int | None = None
-
-        async def capturing_send(message: Message) -> None:
-            nonlocal status
-            if message["type"] == "http.response.start":
-                status = message["status"]
-            await send(message)
-
+        # The whole body before anything decides: the money state, a held
+        # approval and the route all see these bytes.
         try:
-            await self.app(scope, receive, capturing_send)
+            body = await _read_body(scope, receive, cfg.max_body_bytes)
+        except _BodyTooLarge:
+            await self._refuse(scope, receive, send, started, principal, operation_id,
+                               status=413, detail=TOO_LARGE_DETAIL, outcome="too_large")
+            return
+        except _ClientGone:
+            await _audit(scope, started, outcome="error", status=CLIENT_CLOSED_STATUS,
+                         principal=principal, operation_id=operation_id)
+            return
+        try:
+            body_obj = _json_body(scope, body)
+        except _NotJson:
+            await self._refuse(scope, receive, send, started, principal, operation_id,
+                               status=415, detail=JSON_REQUIRED_DETAIL, outcome="unsupported_media")
+            return
+        query = _query(scope)
+        idempotency_key = _idempotency_key(scope)
+        audit_fields: dict = {
+            "args_sha256": canonical_request_sha256(scope["method"], scope["path"], query, body_obj),
+            "args_summary": summarize_args(query, body_obj),
+            "idempotency_key": idempotency_key,
+        }
+
+        # [Task 14: the Idempotency-Key check, lookup and claim go here.]
+        # [Task 15: the rate caps, the daily cost cap and the backtest slot go here.]
+
+        money_state = None
+        if policy["class"] == "money":
+            money_state = await run_in_threadpool(resolve_money_state, policy, path_params,
+                                                  body_obj, cfg)
+        reason = approval_reason(policy, money_state)
+        audit_fields["money_state"] = reason or money_state
+
+        response = _ResponseCapture(send, keep_body=policy["class"] != "read")
+        approval_id: str | None = None
+        try:
+            if reason is not None:
+                # [Task 15: the daily approvals cap goes here.]
+                row = await _create_held_approval(
+                    scope, cfg, principal=principal, operation_id=operation_id,
+                    path_params=path_params, query=query, body=body_obj, reason=reason,
+                    idempotency_key=idempotency_key)
+                approval_id = row["id"]
+                pending = {"id": row["id"], "summary": row["summary"], "money_state": reason,
+                           "expires_at": row["expires_at"]}
+                await JSONResponse({"pending_approval": pending}, status_code=202)(
+                    scope, receive, response.send)
+            else:
+                scope[PRINCIPAL_SCOPE_KEY] = principal
+                await self.app(scope, _buffered_receive(body, receive), response.send)
         except Exception:
+            # [Task 14: release the idempotency record here.]
             await _audit(scope, started, outcome="error", status=500, principal=principal,
-                         operation_id=operation_id)
+                         operation_id=operation_id, approval_id=approval_id, **audit_fields)
             raise
-        final = 500 if status is None else status
-        await _audit(scope, started, outcome="ok" if final < 400 else "error", status=final,
-                     principal=principal, operation_id=operation_id)
+        # [Task 14: finalize the idempotency record with the captured response here.]
+        status = 500 if response.status is None else response.status
+        if approval_id is not None:
+            outcome = "approval_required"
+        else:
+            outcome = "ok" if status < 400 else "error"
+        await _audit(scope, started, outcome=outcome, status=status, principal=principal,
+                     operation_id=operation_id, approval_id=approval_id, **audit_fields)
 
     async def _unauthenticated(self, scope: Scope, receive: Receive, send: Send, started: float,
                                reason: str, *, client: str | None = None) -> None:
@@ -289,11 +458,34 @@ class McpGateMiddleware:
                        headers={"WWW-Authenticate": "Bearer"})
         await _audit(scope, started, outcome="unauthenticated", status=401, client=client)
 
-    async def _forbidden(self, scope: Scope, receive: Receive, send: Send, started: float,
-                         principal: dict, operation_id: str | None) -> None:
-        await _respond(scope, receive, send, 403, NOT_AVAILABLE_DETAIL)
-        await _audit(scope, started, outcome="forbidden", status=403, principal=principal,
+    async def _refuse(self, scope: Scope, receive: Receive, send: Send, started: float,
+                      principal: dict, operation_id: str | None, *, status: int, detail: str,
+                      outcome: str) -> None:
+        await _respond(scope, receive, send, status, detail)
+        await _audit(scope, started, outcome=outcome, status=status, principal=principal,
                      operation_id=operation_id)
+
+
+async def _create_held_approval(scope: Scope, cfg: McpConfig, *, principal: dict,
+                                operation_id: str | None, path_params: dict, query: dict,
+                                body: object, reason: str, idempotency_key: str | None) -> dict:
+    """Store the call as a pending approval and start its push; the new row.
+
+    A failed insert raises, so the call fails closed. The push is best-effort:
+    an approval that exists is answered with its 202 whether or not it went out.
+    """
+    method, path = scope["method"], scope["path"]
+    summary = mcp_approvals.build_summary(operation_id, method, path, path_params, body, reason)
+    row = await run_in_threadpool(
+        mcp_approvals.create_approval, principal=principal, operation_id=operation_id,
+        method=method, path=path, query=query, body=body, money_state=reason, summary=summary,
+        idempotency_key=idempotency_key, correlation_id=_correlation_id(scope), cfg=cfg)
+    try:
+        mcp_approvals.notify_approval_async(row)
+    except Exception as exc:
+        # The type only: a message can quote the summary.
+        _log.warning("mcp: approval push not started (%s)", type(exc).__name__)
+    return row
 
 
 def require_mcp_service(request: Request) -> None:
