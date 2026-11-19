@@ -31,7 +31,13 @@ def _errors(env):
 
 
 def _names(errors, name):
-    return [message for message in errors if name in message]
+    """Messages about one variable. Every message starts with the variable it is about, and
+    a message about another variable may still mention this one (MCP_RP_ID's names
+    MCP_PUBLIC_BASE), so a substring match would let one rule stand in for another."""
+    return [message for message in errors if message.startswith(name + " ")]
+
+
+PUBLIC_BASE_FORMAT = "MCP_PUBLIC_BASE must be https://host[:port]"
 
 
 def test_constants_match_the_contract():
@@ -104,35 +110,44 @@ def test_collects_every_error():
 
 def test_collects_errors_across_variables(env):
     env["MCP_PUBLIC_BASE"] = "https://h/x"
+    env["MCP_RP_ID"] = "h"  # consistent with the host, so only the public-base rule can fire
     env["MCP_SERVICE_TOKEN"] = "short"
     env["MCP_LOG_LEVEL"] = "verbose"
     errors = _errors(env)
-    assert _names(errors, "MCP_PUBLIC_BASE")
-    assert _names(errors, "MCP_SERVICE_TOKEN")
-    assert _names(errors, "MCP_LOG_LEVEL")
+    assert len(errors) == 3, errors
+    (public_base,) = _names(errors, "MCP_PUBLIC_BASE")
+    assert public_base.startswith(PUBLIC_BASE_FORMAT)
+    (token,) = _names(errors, "MCP_SERVICE_TOKEN")
+    assert token == "MCP_SERVICE_TOKEN must be at least 32 bytes"
+    (level,) = _names(errors, "MCP_LOG_LEVEL")
+    assert level.startswith("MCP_LOG_LEVEL must be one of ")
 
 
-@pytest.mark.parametrize("value", [
-    "https://h/",
-    "https://h/x",
-    "http://h.ts.net",
-    "https://h?x=1",
-    "https://h?",
-    "https://h#frag",
-    "https://user:pw@h.ts.net",
-    "https://h.ts.net:",
-    "https://h.ts.net:0",
-    "https://h.ts.net:70000",
-    "https://H.ts.net",
-    "HTTPS://h.ts.net",
-    "ftp://h.ts.net",
-    "h.ts.net",
-    "https://",
+# rp_id matches each value's host, so the MCP_RP_ID rule stays quiet and the only
+# error left is the public-base format rule's.
+@pytest.mark.parametrize("value, rp_id", [
+    ("https://h/", "h"),
+    ("https://h/x", "h"),
+    ("http://h.ts.net", "h.ts.net"),
+    ("https://h?x=1", "h"),
+    ("https://h?", "h"),
+    ("https://h#frag", "h"),
+    ("https://user:pw@h.ts.net", "h.ts.net"),
+    ("https://h.ts.net:", "h.ts.net"),
+    ("https://h.ts.net:0", "h.ts.net"),
+    ("https://h.ts.net:70000", "h.ts.net"),
+    ("https://H.ts.net", "h.ts.net"),
+    ("HTTPS://h.ts.net", "h.ts.net"),
+    ("ftp://h.ts.net", "h.ts.net"),
+    ("h.ts.net", "h.ts.net"),
+    ("https://", "h"),
 ])
-def test_public_base_rejected(env, value):
+def test_public_base_rejected(env, value, rp_id):
     env["MCP_PUBLIC_BASE"] = value
-    env["MCP_RP_ID"] = "h.ts.net"
-    assert _names(_errors(env), "MCP_PUBLIC_BASE")
+    env["MCP_RP_ID"] = rp_id
+    errors = _errors(env)
+    assert len(errors) == 1, errors
+    assert errors[0].startswith(PUBLIC_BASE_FORMAT)
 
 
 @pytest.mark.parametrize("value, rp_id", [
@@ -151,7 +166,10 @@ def test_public_base_accepted(env, value, rp_id):
 
 def test_public_base_value_never_echoed(env):
     env["MCP_PUBLIC_BASE"] = "https://user:hunter2-secret@h.ts.net"
-    assert "hunter2-secret" not in " ".join(_errors(env))
+    env["MCP_RP_ID"] = "h.ts.net"
+    errors = _errors(env)
+    assert [message for message in errors if message.startswith(PUBLIC_BASE_FORMAT)] == errors
+    assert "hunter2-secret" not in " ".join(errors)
 
 
 @pytest.mark.parametrize("rp_id, ok", [
