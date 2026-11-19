@@ -1275,6 +1275,18 @@ def _code_fingerprint() -> "dict[str, str]":
     return out
 
 
+def _mcp_schema_hash() -> "str | None":
+    """The MCP schema hash for /health (contract §4), or None when the schema
+    cannot be built: a liveness probe never fails on it."""
+    try:
+        return mcp_routes.schema_hash(app)
+    except Exception as exc:
+        import logging
+        # The type only: a message can quote the schema.
+        logging.getLogger("uvicorn.error").warning("mcp: schema hash unavailable (%s)", type(exc).__name__)
+        return None
+
+
 @app.get("/health", response_class=JSONResponse, operation_id="health", openapi_extra=mcp_policy("read"))
 def api_health():
     """Liveness probe for load balancers / Dockploy / monitoring.
@@ -1290,6 +1302,9 @@ def api_health():
 
     Live-readiness OPS #1 (2026-04-29): added so Dockploy and external
     probes can verify the API container is responding (not just running).
+
+    ``mcp_schema_hash`` is the MCP schema's x-mcp-schema-hash (contract §4):
+    the MCP server polls it and refetches the schema when it changes.
     """
     import socket as _sock
     try:
@@ -1304,6 +1319,7 @@ def api_health():
         "postgres": _db_status,
         "host": _sock.gethostname(),
         "code": _code_fingerprint(),
+        "mcp_schema_hash": _mcp_schema_hash(),
     }
     if not _ok:
         return JSONResponse(status_code=503, content=payload)
