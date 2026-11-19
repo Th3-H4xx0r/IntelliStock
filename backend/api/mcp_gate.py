@@ -19,9 +19,18 @@ header:
   a push and a 202, and the route does not run. Anything else runs with the
   principal in the ASGI scope, where ``main.get_current_user`` picks it up.
 
+One more branch comes before the listener test: a scope carrying
+REPLAY_SCOPE_KEY is an approved call that the decision route replays in-process
+(api.mcp_replay). It runs only if it wins the approval's one execution
+(mcp_approvals.claim_execution) and the stored row names this method and path
+for the approving user; it then runs as that user's MCP principal, with no
+idempotency and no caps, and is audited as "executed_approved". Anything else
+is a 403 audited as "replay_refused".
+
 The scope keys below are set only here, in-process; no header or request field
 can reach them. Every MCP-listener call except the service-level routes gets one
-McpAudit row, refusals included. Store calls run in the threadpool.
+McpAudit row, refusals included, and so does every replay. Store calls run in
+the threadpool.
 
 Never import api.main here: ``python api/main.py`` runs it as __main__, so an
 import would build a second app.
@@ -74,6 +83,7 @@ IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 UNAUTHENTICATED_DETAIL = "mcp: unauthenticated"
 NOT_AVAILABLE_DETAIL = "mcp: operation not available"
+NOT_EXECUTABLE_DETAIL = "mcp: approval is not executable"
 TOO_LARGE_DETAIL = "mcp: request body too large"
 JSON_REQUIRED_DETAIL = "mcp: JSON body required"
 UNPROCESSABLE_DETAIL = "mcp: request body must be JSON the gate can process"
@@ -94,6 +104,15 @@ def principal_from_scope(scope: Mapping) -> dict | None:
     if isinstance(value, Mapping) and value.get("via") == "mcp":
         return dict(value)
     return None
+
+
+def _replay_principal(value: object) -> dict | None:
+    """The MCP principal a replay marker carries, as the four principal keys; None
+    unless it is a mapping with via "mcp" and a user id."""
+    if not isinstance(value, Mapping) or value.get("via") != "mcp" or not value.get("id"):
+        return None
+    return {"id": value["id"], "username": value.get("username"), "via": "mcp",
+            "client": value.get("client")}
 
 
 def match_route(app: object, scope: Scope) -> tuple[BaseRoute | None, dict]:
@@ -372,6 +391,10 @@ class McpGateMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        if REPLAY_SCOPE_KEY in scope:
+            # Only api.mcp_replay sets this key, in-process; it has no listener.
+            await self._replay(scope, receive, send)
+            return
         cfg = self.config_loader()
         server = scope.get("server")
         if not server or server[1] != cfg.port:
@@ -487,6 +510,63 @@ class McpGateMiddleware:
             outcome = "ok" if status < 400 else "error"
         await _audit(scope, started, outcome=outcome, status=status, principal=principal,
                      operation_id=operation_id, approval_id=approval_id, **audit_fields)
+
+    async def _replay(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Run an approved call the decision route replays in-process, exactly once.
+
+        The approval's execution is started first (claim_execution), so a second
+        replay of the same approval, or one of a row that is not approved and
+        claimed, is refused; so is a row of another user or one that names
+        another method or path, and a route that is gone or class "never". No
+        idempotency and no caps: the call was counted when it was held.
+        """
+        started = time.perf_counter()
+        marker = scope.get(REPLAY_SCOPE_KEY)
+        marker = marker if isinstance(marker, Mapping) else {}
+        approval_id = marker.get("approval_id")
+        approval_id = approval_id if mcp_approvals.is_approval_id(approval_id) else None
+        principal = _replay_principal(marker.get("principal"))
+        row = None
+        if principal is not None and approval_id is not None:
+            row = await run_in_threadpool(mcp_approvals.claim_execution, approval_id)
+        if (row is None or row.get("user_id") != principal["id"]
+                or row.get("method") != scope.get("method") or row.get("path") != scope.get("path")):
+            await self._refuse_replay(scope, receive, send, started, principal, approval_id, None,
+                                      NOT_EXECUTABLE_DETAIL)
+            return
+
+        route, _ = match_route(scope.get("app"), scope)
+        policy = route_policy(route)
+        operation_id = getattr(route, "operation_id", None)
+        if policy is None or policy["class"] == "never":
+            await self._refuse_replay(scope, receive, send, started, principal, approval_id, operation_id,
+                                      NOT_AVAILABLE_DETAIL)
+            return
+
+        audit_fields = {"approval_id": approval_id, "money_state": row.get("money_state"),
+                        "args_sha256": row.get("body_sha256"),
+                        "args_summary": summarize_args(row.get("query") or {}, row.get("body"))}
+        scope[PRINCIPAL_SCOPE_KEY] = principal
+        response = _ResponseCapture(send, keep_body=False)
+
+        async def audit() -> None:
+            await _audit(scope, started, outcome="executed_approved",
+                         status=500 if response.status is None else response.status,
+                         principal=principal, operation_id=operation_id, **audit_fields)
+
+        try:
+            await self.app(scope, receive, response.send)
+        except Exception:
+            await audit()
+            raise
+        await audit()
+
+    async def _refuse_replay(self, scope: Scope, receive: Receive, send: Send, started: float,
+                             principal: dict | None, approval_id: str | None, operation_id: str | None,
+                             detail: str) -> None:
+        await _respond(scope, receive, send, 403, detail)
+        await _audit(scope, started, outcome="replay_refused", status=403, principal=principal,
+                     operation_id=operation_id, approval_id=approval_id)
 
     async def _unauthenticated(self, scope: Scope, receive: Receive, send: Send, started: float,
                                reason: str, *, client: str | None = None) -> None:

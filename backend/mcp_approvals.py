@@ -23,6 +23,14 @@ An approval device is a P-256 signing key the human enrols from the iOS app
 enrolment, and every enrolment alerts Discord (alert_device_registered), so a
 key added from a stolen session is announced before it can approve anything
 and can be revoked in that window. A device is visible only to its own user.
+
+A decision (decide) is the user's signed answer from such a device: ECDSA P-256
+over signed_message, a ts within SIGNATURE_MAX_SKEW_S of the server clock, and
+the row's body_sha256. An approval and the claim on its one execution are one
+compare-and-swap (exec_claimed_at is set with the status), so a crash at any
+point after approving leaves a claimed row that a read marks failed once stale,
+never one approved forever. The replay then consumes that claim exactly once
+(claim_execution) and records the outcome (record_result).
 """
 from __future__ import annotations
 
@@ -35,6 +43,8 @@ import uuid
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
@@ -165,6 +175,7 @@ def create_approval(*, principal: dict, operation_id: str, method: str, path: st
         "decided_at": None,
         "device_id": None,
         "exec_claimed_at": None,
+        "exec_started_at": None,
         "executed_at": None,
     }
     result = store.insert(APPROVALS_TABLE, row)
@@ -430,3 +441,174 @@ def alert_device_registered(row: dict, username: str) -> None:
                              discord_channel="notifications")
     except Exception as exc:
         _log.warning("mcp: device registration alert failed (%s)", type(exc).__name__)
+
+
+# -- decisions --------------------------------------------------------------------
+
+SIGNATURE_MAX_SKEW_S = 60
+DECISIONS = ("approve", "deny")
+NOT_FOUND_DETAIL = "approval not found"
+# The gate's NOT_AVAILABLE_DETAIL: an MCP principal is refused here as it is on :8012.
+MCP_PRINCIPAL_DETAIL = "mcp: operation not available"
+NOT_PENDING_DETAIL = "approval is no longer pending"
+
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_SIGNATURE_MAX_CHARS = 200        # a DER P-256 signature is at most 72 bytes, 96 base64 characters
+
+
+class DecisionError(Exception):
+    """A refused decision, with the HTTP status and detail the route answers."""
+
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+
+
+def signed_message(approval_id: str, body_sha256: str, decision: str, ts: int) -> bytes:
+    """The bytes an approval device signs (contract §5)."""
+    return f"{approval_id}|{body_sha256}|{decision}|{ts}".encode("utf-8")
+
+
+def _is_strict_b64(value: str) -> bool:
+    try:
+        base64.b64decode(value, validate=True)
+    except ValueError:                # binascii.Error is a ValueError
+        return False
+    return True
+
+
+def verify_signature(public_key_b64: str, message: bytes, signature_b64: str) -> bool:
+    """True when signature_b64 is base64 of a DER ECDSA P-256 SHA-256 signature of
+    message by the key in public_key_b64; False on any decode error or bad signature."""
+    try:
+        key = decode_public_key(public_key_b64)
+        signature = base64.b64decode(signature_b64, validate=True)
+        key.verify(signature, message, ec.ECDSA(hashes.SHA256()))
+    except (InvalidSignature, ValueError, TypeError):
+        return False
+    return True
+
+
+def _decision_fields(payload: object) -> tuple[str, str, int, str, str]:
+    """(decision, body_sha256, ts, device_id, signature), or DecisionError 400."""
+    if not isinstance(payload, Mapping):
+        raise DecisionError(400, "decision body must be a JSON object")
+    decision = payload.get("decision")
+    if not isinstance(decision, str) or decision not in DECISIONS:
+        raise DecisionError(400, "decision must be approve or deny")
+    body_sha256 = payload.get("body_sha256")
+    if not isinstance(body_sha256, str) or _SHA256_HEX_RE.fullmatch(body_sha256) is None:
+        raise DecisionError(400, "body_sha256 must be 64 lowercase hex characters")
+    ts = payload.get("ts")
+    if not isinstance(ts, int) or isinstance(ts, bool):
+        raise DecisionError(400, "ts must be an integer (unix seconds)")
+    device_id = payload.get("device_id")
+    if not is_approval_id(device_id):
+        raise DecisionError(400, "device_id is malformed")
+    signature = payload.get("signature")
+    if (not isinstance(signature, str) or not 1 <= len(signature) <= _SIGNATURE_MAX_CHARS
+            or not _is_strict_b64(signature)):
+        raise DecisionError(400, f"signature must be base64 of at most {_SIGNATURE_MAX_CHARS} characters")
+    return decision, body_sha256, ts, device_id, signature
+
+
+def decide(approval_id: str, payload: dict, *, user: dict, cfg: McpConfig,
+           now: datetime | None = None) -> dict:
+    """Apply the user's signed decision and return the row after the CAS.
+
+    Raises DecisionError: 400 bad input or a body_sha256 that is not the row's;
+    403 an MCP principal, a ts more than SIGNATURE_MAX_SKEW_S from now, a device
+    that is not the user's active one, or a bad signature; 404 a malformed,
+    unknown or foreign id; 409 not pending (or another decision won); 410 past
+    expires_at (the row becomes "expired" and is scrubbed).
+
+    "approve" sets status, decided_at, device_id and exec_claimed_at in one
+    write; the caller then replays the call. "deny" is terminal and scrubbed in
+    the same write. cfg is accepted for the route's signature; the expiry is the
+    row's own expires_at.
+    """
+    decision, body_sha256, ts, device_id, signature = _decision_fields(payload)
+    if user.get("via") == "mcp":
+        raise DecisionError(403, MCP_PRINCIPAL_DETAIL)
+    user_id = user.get("id")
+    row = store.get(APPROVALS_TABLE, approval_id) if is_approval_id(approval_id) else None
+    if row is None or not user_id or row.get("user_id") != user_id:
+        raise DecisionError(404, NOT_FOUND_DETAIL)
+    if row.get("status") != "pending":
+        raise DecisionError(409, NOT_PENDING_DETAIL)
+    now = now or utc_now()
+    if _expired(row, now):
+        expired = cas_status(approval_id, expect="pending",
+                             patch={"status": "expired", "body": terminal_scrub(row)["body"]})
+        if expired is None:
+            raise DecisionError(409, NOT_PENDING_DETAIL)
+        raise DecisionError(410, "approval expired")
+    if body_sha256 != row.get("body_sha256"):
+        raise DecisionError(400, "body_sha256 does not match the approval")
+    # Compared, never subtracted: Python compares an int of any size with a
+    # float exactly, where a subtraction would overflow on a huge ts.
+    now_s = now.timestamp()
+    if ts < now_s - SIGNATURE_MAX_SKEW_S or ts > now_s + SIGNATURE_MAX_SKEW_S:
+        raise DecisionError(403, f"ts is more than {SIGNATURE_MAX_SKEW_S} s from the server clock")
+    device = active_device(user_id=user_id, device_id=device_id, now=now)
+    if device is None:
+        raise DecisionError(403, "device is unknown, revoked or not yet active")
+    if not verify_signature(device.get("public_key"), signed_message(approval_id, body_sha256, decision, ts),
+                            signature):
+        raise DecisionError(403, "signature does not verify")
+    stamp = iso_utc(now)
+    patch: dict = {"decided_at": stamp, "device_id": device_id}
+    if decision == "approve":
+        # Approved and claimed for execution in this one write, so no crash can
+        # leave an approved row that no read would ever settle.
+        patch.update(status="approved", exec_claimed_at=stamp)
+    else:
+        patch.update(status="denied", body=terminal_scrub(row)["body"])
+    new = cas_status(approval_id, expect="pending", patch=patch)
+    if new is None:
+        raise DecisionError(409, NOT_PENDING_DETAIL)
+    return new
+
+
+def claim_execution(approval_id: str, *, now: datetime | None = None) -> dict | None:
+    """Start the approval's one execution; the new row, or None.
+
+    A CAS that holds only while the row is approved, claimed at decision time
+    (exec_claimed_at) and not yet started; it stamps exec_started_at, so exactly
+    one replay of an approval can run. None for a malformed or unknown id, or a
+    row in any other state.
+    """
+    if not is_approval_id(approval_id):
+        return None
+    row = store.get(APPROVALS_TABLE, approval_id)
+    if (row is None or row.get("status") != "approved" or row.get("exec_claimed_at") is None
+            or row.get("exec_started_at") is not None):
+        return None
+    when = (P.field("status").eq("approved") & P.field("exec_claimed_at").is_not_null()
+            & P.field("exec_started_at").is_null())
+    new = {**row, "exec_started_at": iso_utc(now or utc_now())}
+    return store.replace_if(APPROVALS_TABLE, approval_id, when=when, doc=new)
+
+
+def record_result(approval_id: str, *, status_code: int, result: object,
+                  now: datetime | None = None) -> dict | None:
+    """Record the replay's outcome on an approved row and return it.
+
+    "executed" when 200 <= status_code < 300, else "failed"; either is terminal,
+    so the body is scrubbed. None when the row is not approved any more (a read
+    already settled a stale execution as failed).
+    """
+    if not is_approval_id(approval_id):
+        return None
+    row = store.get(APPROVALS_TABLE, approval_id)
+    if row is None or row.get("status") != "approved":
+        return None
+    patch = {
+        "status": "executed" if 200 <= status_code < 300 else "failed",
+        "result_status": status_code,
+        "result": result,
+        "executed_at": iso_utc(now or utc_now()),
+        "body": terminal_scrub(row)["body"],
+    }
+    return cas_status(approval_id, expect="approved", patch=patch)

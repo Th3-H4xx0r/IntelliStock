@@ -14,20 +14,27 @@ their store calls run in the threadpool.
 The approval-device routes are class "never": only a human enrols, lists or
 revokes a signing key. The gate already refuses them on :8012, and each handler
 refuses an MCP principal again (defense in depth).
+
+The decision route is class "never" too, and mcp_approvals.decide refuses an MCP
+principal again. It is the one async handler: an approval is replayed through
+the app in-process (api.mcp_replay) on the event loop, so its store calls go
+through run_in_threadpool, and the replayed route runs as it always does.
 """
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 
 import mcp_approvals
 from api.mcp_gate import NOT_AVAILABLE_DETAIL
+from api.mcp_replay import replay_approved_request
 from mcp_policy import McpConfig, mcp_policy
 
 LIST_LIMIT_MIN = 1
 LIST_LIMIT_MAX = 200
-NOT_FOUND_DETAIL = "approval not found"
+NOT_FOUND_DETAIL = mcp_approvals.NOT_FOUND_DETAIL
 DEVICE_NOT_FOUND_DETAIL = "device not found"
 
 
@@ -60,6 +67,29 @@ def build_router(current_user_dependency: Callable) -> APIRouter:
         row = mcp_approvals.get_visible(approval_id, viewer=current_user, cfg=McpConfig.from_env())
         if row is None:
             raise HTTPException(status_code=404, detail=NOT_FOUND_DETAIL)
+        return mcp_approvals.approval_public(row)
+
+    @router.post("/mcp/approvals/{approval_id}/decision", operation_id="decide_mcp_approval",
+                 openapi_extra=mcp_policy("never"))
+    async def api_mcp_approval_decision(approval_id: str, request: Request, payload: dict = Body(...),
+                                        current_user: dict = authed):
+        """Approve or deny a held MCP call with an approval device's signature; an approved call runs once."""
+        cfg = McpConfig.from_env()
+        try:
+            row = await run_in_threadpool(mcp_approvals.decide, approval_id, payload, user=current_user, cfg=cfg)
+        except mcp_approvals.DecisionError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.detail) from None
+        if row["status"] == "approved":
+            principal = {"id": current_user["id"], "username": current_user.get("username"), "via": "mcp",
+                         "client": row["client"]}
+            result = await replay_approved_request(request.app, row, principal)
+            recorded = await run_in_threadpool(mcp_approvals.record_result, row["id"],
+                                               status_code=result.status, result=result.body)
+            if recorded is None:
+                # A read settled the execution first (stale): answer the row as it stands.
+                recorded = await run_in_threadpool(mcp_approvals.get_visible, row["id"],
+                                                   viewer=current_user, cfg=cfg)
+            row = recorded or row
         return mcp_approvals.approval_public(row)
 
     @router.post("/mcp/approval-devices", operation_id="register_mcp_approval_device", status_code=201,
