@@ -10,6 +10,7 @@ import Foundation
 extension AppServices {
     var agentRepository: AgentRepository { AgentRepository(client: apiClient) }
     var analysisRepository: AnalysisRepository { AnalysisRepository(client: apiClient) }
+    var approvalsRepository: ApprovalsRepository { ApprovalsRepository(client: apiClient) }
     var authRepository: AuthRepository { AuthRepository(client: apiClient) }
     var backtestRepository: BacktestRepository { BacktestRepository(client: apiClient) }
     var brokerageRepository: BrokerageRepository { BrokerageRepository(client: apiClient) }

@@ -12,6 +12,7 @@ struct MoreTabView: View {
     /// Circled symbols drop the circle; Backtests takes a line chart, since
     /// `chart.bar.xaxis` draws solid bars beside the outlines.
     private static let items: [(icon: String, label: String, route: Route, tile: String)] = [
+        ("verified_user", "Approvals", .approvals, "checkmark.shield"),
         ("currency_bitcoin", "Crypto", .crypto, "bitcoinsign"),
         ("analytics", "Backtests", .backtests, "chart.line.uptrend.xyaxis"),
         ("account_balance", "Brokerages", .brokerages, Symbol.named("account_balance")),

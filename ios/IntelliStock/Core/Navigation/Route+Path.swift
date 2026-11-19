@@ -28,6 +28,9 @@ nonisolated extension Route {
         case .tokenUsage: return "/token-usage"
         case .settings: return "/settings"
         case .notificationSettings: return "/settings/notifications"
+        case .approvalDevices: return "/settings/approval-devices"
+        case .approvals: return "/approvals"
+        case .approval(let id): return "/approvals/\(enc(id))"
         case .connect: return "/connect"
         case .onboarding: return "/onboarding"
         }

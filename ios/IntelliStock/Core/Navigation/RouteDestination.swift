@@ -30,6 +30,9 @@ struct RouteDestination: View {
         case .tokenUsage: TokenUsageView()
         case .settings: SettingsView()
         case .notificationSettings: NotificationSettingsView()
+        case .approvalDevices: ApprovalDeviceSettingsView()
+        case .approvals: ApprovalsView()
+        case .approval(let id): ApprovalDetailView(approvalId: id)
         case .connect: ConnectView()
         case .onboarding: OnboardingView()
         }
