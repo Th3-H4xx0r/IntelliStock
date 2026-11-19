@@ -8234,6 +8234,7 @@ API_URL = os.environ.get("API_URL", "").strip() or ("http://%s:%d" % (API_HOST i
 
 
 if __name__ == "__main__":
-    from api.server_config import build_uvicorn_config, run_server
+    from api.server_config import build_uvicorn_config, serve
 
-    run_server(build_uvicorn_config(app, host=API_HOST, port=API_PORT, proxy_headers=True))
+    # serve() adds the MCP-only listener on MCP_API_PORT when MCP is enabled.
+    serve(app, build_uvicorn_config(app, host=API_HOST, port=API_PORT, proxy_headers=True))

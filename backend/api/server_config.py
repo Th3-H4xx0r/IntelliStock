@@ -11,15 +11,29 @@ an IP or CIDR. Trusting every peer would let a caller who reaches the
 host-published port directly send any X-Forwarded-For it likes and pick its
 own rate-limit bucket. Uvicorn is always handed the filtered list, never the
 raw variable, which it would otherwise read itself and honour ``*`` from.
+
+``serve`` runs the app on a second, MCP-only listener (MCP_API_PORT, contract
+§2) beside the public one when MCP is usable, and never on the public port.
+That listener binds IPv4 only and never believes X-Forwarded-For: the gate
+checks the raw socket peer against MCP_ALLOWED_CIDR and refuses an IPv4-mapped
+IPv6 peer, which a dual-stack bind would hand it. The public server keeps the
+signal handlers and the app's startup and shutdown hooks; the MCP server has
+neither, and stops when the public server does. Its failure never takes the
+public listener down.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import ipaddress
 import logging
 import os
+from collections.abc import Iterator, Mapping
 from typing import List, Optional
 
 import uvicorn
+
+from mcp_policy import McpConfig
 
 _log = logging.getLogger("uvicorn.error")
 
@@ -128,4 +142,92 @@ def run_server(config: uvicorn.Config) -> None:
         # uvicorn.run swallows it, and so does this.
         pass
     if not server.started:
+        raise SystemExit(3)   # uvicorn.main.STARTUP_FAILURE
+
+
+def build_mcp_uvicorn_config(app, *, port: int) -> uvicorn.Config:
+    """The uvicorn config for the MCP-only listener.
+
+    IPv4 only (0.0.0.0) and no proxy headers, so the gate sees the raw socket
+    peer. Lifespan is off, so the app's startup and shutdown hooks run once, on
+    the public listener; and no Server header names the software.
+    """
+    config = build_uvicorn_config(app, host="0.0.0.0", port=port, proxy_headers=False)
+    config.lifespan = "off"
+    config.server_header = False
+    return config
+
+
+class _NoSignalServer(uvicorn.Server):
+    """A uvicorn server that installs no signal handlers. The public server owns
+    SIGINT and SIGTERM, and _serve_both stops this one when the public one ends."""
+
+    @contextlib.contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        yield
+
+
+async def _serve_mcp(mcp: uvicorn.Server) -> None:
+    """Serve the MCP listener; if it stops with an error, log it and return.
+
+    uvicorn calls sys.exit(1) when it cannot bind its port. Uncaught in its
+    task, that SystemExit would stop the event loop, and the public listener
+    with it.
+    """
+    try:
+        await mcp.serve()
+    except (Exception, SystemExit) as exc:
+        _log.error("MCP listener stopped (%s); the public listener keeps serving",
+                   type(exc).__name__, exc_info=not isinstance(exc, SystemExit))
+
+
+async def _serve_both(public: uvicorn.Server, mcp: uvicorn.Server) -> None:
+    """Serve the public listener, with the MCP listener beside it until it ends."""
+    mcp_task = asyncio.create_task(_serve_mcp(mcp))
+    try:
+        await public.serve()
+    finally:
+        mcp.should_exit = True
+        await mcp_task
+
+
+def _loop_factory(config: uvicorn.Config):
+    """The event loop uvicorn.run would use for this config: uvloop under
+    uvicorn[standard], else asyncio's own."""
+    get_loop_factory = getattr(config, "get_loop_factory", None)
+    return get_loop_factory() if get_loop_factory is not None else None
+
+
+def serve(app, public_config: uvicorn.Config, *, environ: Optional[Mapping[str, str]] = None) -> None:
+    """Serve the public listener, plus the MCP-only listener when MCP is usable.
+
+    MCP off, or on without a usable token or CIDR: the public listener alone,
+    exactly as run_server. MCP_API_PORT equal to the public port: an ERROR and
+    the public listener alone. Otherwise both, in one event loop, keeping
+    run_server's exit codes: SIGINT ends quietly, and 3 when the public listener
+    never started.
+    """
+    cfg = McpConfig.from_env(environ)
+    if not cfg.usable:
+        if cfg.enabled:
+            _log.warning("MCP_ENABLED is set, but MCP_SERVICE_TOKEN (at least 32 bytes) or "
+                         "MCP_ALLOWED_CIDR is not usable; MCP listener off")
+        else:
+            _log.info("MCP listener off")
+        run_server(public_config)
+        return
+    if cfg.port == public_config.port:
+        _log.error("MCP_API_PORT must differ from API_PORT; MCP listener off")
+        run_server(public_config)
+        return
+    public = uvicorn.Server(public_config)
+    mcp = _NoSignalServer(build_mcp_uvicorn_config(app, port=cfg.port))
+    try:
+        with asyncio.Runner(loop_factory=_loop_factory(public_config)) as runner:
+            runner.run(_serve_both(public, mcp))
+    except KeyboardInterrupt:
+        # As in run_server: uvicorn re-raises a caught SIGINT after a graceful
+        # shutdown, and uvicorn.run swallows it.
+        pass
+    if not public.started:
         raise SystemExit(3)   # uvicorn.main.STARTUP_FAILURE
