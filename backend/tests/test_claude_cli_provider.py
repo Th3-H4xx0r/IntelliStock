@@ -7,6 +7,8 @@ real CC install (env-gated).
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import io
 import json
 import os
@@ -968,6 +970,121 @@ class TestTestClaudeCliHelper:
         assert out["ok"] is False
         assert out["logged_in"] is False
         assert "not logged in" in out["error"].lower()
+
+
+# ── Child environment allowlist ─────────────────────────────────────────────
+
+
+_SECRETS = ("JWT_SECRET", "POSTGRES_PASSWORD", "INTELLISTOCK_CRED_KEY", "SECRET_AUTH_KEY",
+            "ALPACA_API_KEY", "ALPACA_SECRET_KEY", "OPENROUTER_API_KEY", "PG_DSN",
+            "MCP_SERVICE_TOKEN", "ANTHROPIC_API_KEY", "DISCORD_WEBHOOK_URL")
+
+
+class TestChildEnvAllowlist:
+    def test_child_env_drops_every_secret(self, monkeypatch):
+        for k in _SECRETS:
+            monkeypatch.setenv(k, "canary")
+        env = provider._claude_child_env("/tmp/cc-home-x")
+        assert not set(_SECRETS) & set(env)
+        assert env["HOME"] == "/tmp/cc-home-x"
+
+    def test_child_env_keeps_what_claude_needs(self, monkeypatch):
+        keep = {"PATH": "/usr/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "LC_CTYPE": "C.UTF-8",
+                "TZ": "UTC", "TERM": "xterm", "TMPDIR": "/tmp", "CLAUDE_CONFIG_DIR": "/cfg",
+                "HTTPS_PROXY": "http://proxy:3128", "NO_PROXY": "127.0.0.1",
+                "NODE_EXTRA_CA_CERTS": "/ca.pem", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-x"}
+        for k, v in keep.items():
+            monkeypatch.setenv(k, v)
+        env = provider._claude_child_env()
+        assert {k: env.get(k) for k in keep} == keep
+        assert env["HOME"] == os.environ["HOME"]
+
+    def test_child_env_supplies_the_token_file(self, tmp_path, monkeypatch):
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "oauth_token").write_text("sk-ant-oat01-file\n")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        env = provider._claude_child_env("/tmp/cc-home-y")
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-file"
+        assert env["HOME"] == "/tmp/cc-home-y"
+
+    def test_allowlist_holds_no_secret_shaped_name(self):
+        keys = provider._CHILD_ENV_KEYS
+        assert not [k for k in keys if any(s in k for s in ("SECRET", "PASSWORD", "DSN", "API_KEY", "CRED"))]
+        assert [k for k in keys if "TOKEN" in k] == ["CLAUDE_CODE_OAUTH_TOKEN"]
+
+    def test_every_subprocess_call_passes_an_explicit_env(self):
+        tree = ast.parse(inspect.getsource(provider))
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute) and n.func.attr in ("run", "Popen")
+                 and isinstance(n.func.value, ast.Name) and n.func.value.id == "subprocess"]
+        assert len(calls) >= 8
+        assert [n.lineno for n in calls if not any(k.arg == "env" for k in n.keywords)] == []
+        assert "os.environ.copy()" not in inspect.getsource(provider)
+
+    def test_spawn_hands_popen_the_allowlisted_env(self, tmp_path, monkeypatch, manager):
+        monkeypatch.setenv("JWT_SECRET", "canary")
+        monkeypatch.setenv("CLAUDE_CLI_MCP_DIR", str(tmp_path))
+        runtime_home = str(tmp_path / "cc-home")
+        monkeypatch.setattr(provider, "_prepare_runtime_home", lambda sess: runtime_home)
+        monkeypatch.setattr(provider, "_cleanup_runtime_home", lambda path: None)
+        created: List[FakeProcess] = []
+        seen: List[Dict[str, Any]] = []
+
+        def _factory(argv, **kwargs):
+            seen.append(kwargs)
+            fp = FakeProcess(argv)
+            created.append(fp)
+            return fp
+
+        monkeypatch.setattr("chatbot.claude_cli_provider.subprocess.Popen", _factory)
+        _feed_after_write(created, [_make_result("ok")])
+        assert _send(manager)["content"] == "ok"
+        env = seen[-1]["env"]
+        assert "JWT_SECRET" not in env
+        assert env["HOME"] == runtime_home
+
+    def test_structured_call_hands_run_the_allowlisted_env(self, monkeypatch):
+        monkeypatch.setenv("JWT_SECRET", "canary")
+        envelope = json.dumps({
+            "type": "result",
+            "is_error": False,
+            "result": json.dumps({"value": "hi there"}),
+        })
+        seen: List[Dict[str, str]] = []
+
+        def _run(argv, **kwargs):
+            seen.append(kwargs["env"])
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout=envelope, stderr="")
+
+        monkeypatch.setattr("chatbot.claude_cli_provider.subprocess.run", _run)
+        out = call_claude_cli_structured(
+            model="claude-haiku-4-5",
+            system_prompt="be terse",
+            user_prompt="say hi",
+            output_schema=_FakeBaseModel,
+            cli_path="claude",
+        )
+        assert out.value == "hi there"
+        assert seen and "JWT_SECRET" not in seen[-1]
+
+    @pytest.mark.parametrize("wait", ["300", None, "abc"])
+    def test_mcp_config_env_block(self, tmp_path, monkeypatch, wait):
+        monkeypatch.setenv("CLAUDE_CLI_MCP_DIR", str(tmp_path))
+        if wait is None:
+            monkeypatch.delenv("INTELLISTOCK_MCP_CONFIRM_WAIT_SEC", raising=False)
+        else:
+            monkeypatch.setenv("INTELLISTOCK_MCP_CONFIRM_WAIT_SEC", wait)
+        sess = provider._Session(conversation_id="conv-cfg-1", model="m", cli_path="claude",
+                                 system_prompt="s", user_id="u1")
+        with open(provider._write_session_mcp_config(sess), encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        env = cfg["mcpServers"]["intellistock"]["env"]
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
+        assert {"INTELLISTOCK_MCP_URL", "INTELLISTOCK_MCP_TOKEN",
+                "INTELLISTOCK_CONVERSATION_ID", "INTELLISTOCK_USER_ID"} <= set(env)
+        assert env["INTELLISTOCK_MCP_TOKEN"] == sess.mcp_token
+        assert env.get("INTELLISTOCK_MCP_CONFIRM_WAIT_SEC") == ("300" if wait == "300" else None)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
