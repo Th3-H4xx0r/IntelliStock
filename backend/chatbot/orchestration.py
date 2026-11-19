@@ -561,14 +561,46 @@ def confirm_pending_tool(
     pending_message_id: str,
     approved: bool,
 ) -> List[Dict[str, Any]]:
+    """Approve or decline the tool a message waits on, then resume the turn.
+
+    The message is claimed with a compare-and-swap before anything acts on
+    it, the same claim the MCP confirm path makes: of two approvals that both
+    read "pending" (on either endpoint), one wins and the other gets the "no
+    pending tool" ValueError, so the tool runs at most once."""
     user_id = user["id"]
     convo = conv_store.get_conversation(conn, user_id, conv_id)
     if not convo:
         raise ValueError("conversation not found")
+    not_pending = "no pending tool found on that message"
     pending_msg = conv_store.find_message(convo, pending_message_id)
-    if not pending_msg or pending_msg.get("status") != "pending_confirmation":
-        raise ValueError("no pending tool found on that message")
-    pending = pending_msg.get("pending_tool") or {}
+    if not pending_msg or pending_msg.get("status") != conv_store.STATUS_PENDING:
+        raise ValueError(not_pending)
+
+    def resolved(msg: Dict[str, Any]) -> Dict[str, Any]:
+        # Complete, and carry tool_calls (rebuilt from pending_tool when the
+        # message has none) so the tool message that follows has a parent.
+        pending = msg.get("pending_tool") or {}
+        return {
+            "status": conv_store.STATUS_COMPLETE,
+            "pending_tool": None,
+            "tool_calls": msg.get("tool_calls") or [{
+                "id": pending.get("tool_call_id"),
+                "name": pending.get("name") or "",
+                "arguments": pending.get("arguments") or {},
+            }],
+        }
+
+    # Approve moves the message to "executing" while the tool runs; decline
+    # resolves it outright. Either way the swap only succeeds from "pending",
+    # so an approve racing a decline applies exactly one.
+    claimed = conv_store.transition_message(
+        conn, user_id, conv_id, pending_message_id,
+        expect_status=conv_store.STATUS_PENDING,
+        changes={"status": conv_store.STATUS_EXECUTING} if approved else resolved(pending_msg),
+    )
+    if claimed is None:
+        raise ValueError(not_pending)
+    pending = claimed.get("pending_tool") or {}
     tc_id = pending.get("tool_call_id")
     name = pending.get("name") or ""
     args = pending.get("arguments") or {}
@@ -576,18 +608,8 @@ def confirm_pending_tool(
     appended: List[Dict[str, Any]] = []
 
     if not approved:
-        # Replace the pending message with a final assistant message + a tool
-        # message that tells the LLM the user declined, so subsequent calls
-        # have context.
-        resolved_msg = {
-            **pending_msg,
-            "status": "complete",
-            "pending_tool": None,
-            "tool_calls": pending_msg.get("tool_calls") or [
-                {"id": tc_id, "name": name, "arguments": args}
-            ],
-        }
-        conv_store.replace_message(conn, user_id, conv_id, pending_message_id, resolved_msg)
+        # A tool message that tells the LLM the user declined, so subsequent
+        # calls have context.
         decline_msg = conv_store.new_message(
             "tool",
             content=json.dumps({"error": "user_declined", "tool": name}),
@@ -598,7 +620,7 @@ def confirm_pending_tool(
         # Resume the conversation: ask the LLM for a follow-up text answer.
         return _resume_after_tool_results(conn, user, conv_id, appended)
 
-    # Approved → execute now
+    # Approved and claimed → execute now
     ok, value = _execute_tool(conn, user, name, args)
     tool_msg, blocks = _build_tool_result_message(
         {"id": tc_id, "name": name},
@@ -607,16 +629,24 @@ def confirm_pending_tool(
     )
     if blocks:
         tool_msg["blocks"] = blocks
-    # Promote pending message to complete (carry tool_calls for context)
-    resolved_msg = {
-        **pending_msg,
-        "status": "complete",
-        "pending_tool": None,
-        "tool_calls": pending_msg.get("tool_calls") or [
-            {"id": tc_id, "name": name, "arguments": args}
-        ],
-    }
-    conv_store.replace_message(conn, user_id, conv_id, pending_message_id, resolved_msg)
+    why = "was no longer executing"
+    try:
+        done = conv_store.transition_message(
+            conn, user_id, conv_id, pending_message_id,
+            expect_status=conv_store.STATUS_EXECUTING,
+            changes=resolved(claimed),
+        )
+    except Exception as e:
+        # Busy or a store error. The tool already ran, so its result must not
+        # be dropped; the message stays "executing", which no approval can
+        # claim again.
+        done, why = None, f"could not be marked complete ({e!r})"
+    if done is None:
+        # The tool ran, so the turn still resumes with its result.
+        _log.warning(
+            "tool=%s ran but message %r %s; resuming with its result anyway",
+            name, pending_message_id, why,
+        )
     appended.append(tool_msg)
     return _resume_after_tool_results(conn, user, conv_id, appended)
 
@@ -640,7 +670,7 @@ def _resume_after_tool_results(
     new_appends = list(appended_so_far)
     _run_loop(conn, user, convo, history, new_appends, model_cfg, system, auto_confirm_safe, conv_id=conv_id)
     # Persist the full new_appends — confirm_pending_tool only persisted the
-    # pending→complete promotion via replace_message, so the tool result
+    # message's status change via transition_message, so the tool result
     # message it passed in `appended_so_far` is NOT yet in the DB. Saving
     # only the suffix (the previous behaviour) left the assistant.tool_calls
     # with no matching tool result on disk, which Azure / OpenAI 400 on the

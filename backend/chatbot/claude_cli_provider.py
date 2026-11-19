@@ -157,6 +157,12 @@ class ClaudeCliValidationError(ClaudeCliError):
     """Output JSON did not match the requested Pydantic schema."""
 
 
+class ClaudeCliToolPolicyError(ClaudeCliError):
+    """The session's ``system:init`` event listed a built-in (non-``mcp__``)
+    tool. Every spawn passes ``--tools ""``, so this means the flag
+    stopped working; the session is refused and killed. Not retried."""
+
+
 # ── extra_args whitelist ───────────────────────────────────────────────────
 
 # Flags users may set via the Models table's ``extra_args`` field. Each
@@ -354,10 +360,10 @@ _SAFETY_FLAGS = [
 
 
 # Env vars that derail claude-cli's subscription (OAuth) mode. We run claude
-# strictly on the operator's Claude subscription, so we scrub these from every
-# spawned child env (and from copied settings ``env`` blocks). We inherit the
-# parent env with ``os.environ.copy()`` to keep PATH / HOME / locale, then
-# strip just these:
+# strictly on the operator's Claude subscription. Every spawned child env is
+# built from an allowlist (``_claude_child_env``), which none of these are
+# on; ``_strip_api_key_env`` still pops them as belt and braces, and they are
+# blanked in copied settings ``env`` blocks and the ``--settings`` override:
 #
 #   * ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN — Claude Code's auth precedence
 #     puts these BEFORE the subscription OAuth, so a leftover key hijacks every
@@ -398,14 +404,52 @@ def _oauth_token_from_file() -> str:
 def _strip_api_key_env(env: Dict[str, str]) -> Dict[str, str]:
     """Remove API-key/token env vars so ``claude`` uses the subscription
     OAuth, not an inherited key, and supply the long-lived subscription token
-    when one is stored. Mutates and returns *env* for chaining:
-    ``child_env = _strip_api_key_env(os.environ.copy())``."""
+    when one is stored. Mutates and returns *env* for chaining; spawn sites
+    reach it through ``_claude_child_env``, never with a copy of the whole
+    process environment."""
     for key in _SUBSCRIPTION_CONFLICTING_ENV:
         env.pop(key, None)
     if not (env.get(_OAUTH_TOKEN_ENV) or "").strip():
         token = _oauth_token_from_file()
         if token:
             env[_OAUTH_TOKEN_ENV] = token
+    return env
+
+
+# The only variables a ``claude`` child inherits from the API process (plus
+# ``LC_*``). The API's environment holds JWT_SECRET, POSTGRES_PASSWORD,
+# INTELLISTOCK_CRED_KEY and broker keys, and Claude Code hands its whole
+# environment to the stdio MCP server it spawns, so anything inherited here
+# reaches both. Claude authenticates and runs MCP tools with PATH, HOME, USER,
+# LOGNAME, SHELL, LANG, TERM and TMPDIR alone (verified 2026-11-19) plus its
+# subscription token; the rest are temp/XDG dirs, proxy and CA settings an
+# operator may set, Claude's config dir, Python's IO encoding, and the
+# Windows basics. Never add a secret-shaped name here.
+_CHILD_ENV_KEYS = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TZ", "LANG", "LANGUAGE",
+    "TMPDIR", "TMP", "TEMP",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+    "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    "PYTHONIOENCODING", "PYTHONUTF8",
+    "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+})
+_CHILD_ENV_PREFIXES = ("LC_",)
+
+
+def _claude_child_env(home: Optional[str] = None) -> Dict[str, str]:
+    """Environment for every ``claude`` subprocess: the allowlisted subset
+    of ``os.environ``, passed through ``_strip_api_key_env`` (which reads
+    the token file from the process HOME, before any override), then
+    ``HOME = home`` when *home* is given."""
+    env = {
+        k: v for k, v in os.environ.items()
+        if k in _CHILD_ENV_KEYS or k.startswith(_CHILD_ENV_PREFIXES)
+    }
+    _strip_api_key_env(env)
+    if home:
+        env["HOME"] = home
     return env
 
 
@@ -434,9 +478,18 @@ _FORCE_SUBSCRIPTION_ARGS = ["--settings", _FORCE_SUBSCRIPTION_SETTINGS]
 
 
 # Argv that opens up the IntelliStock MCP server (and ONLY the
-# IntelliStock MCP server — CC's built-in Bash / Read / Edit / etc. stay
-# disabled). The session populates ``--mcp-config`` with the per-session
-# path at spawn time.
+# IntelliStock MCP server). The session populates ``--mcp-config`` with
+# the per-session path at spawn time.
+#
+# Built-in tools: ``--tools ""`` removes every CC built-in. Lab note
+# (2026-11-19, claude 2.1.328): without it, 24 built-ins — including
+# Bash, Read, Write, Edit, WebSearch and Task — were live under
+# ``--dangerously-skip-permissions``; ``--allowedTools`` grants
+# permission, it does not remove tools. With it, only ``mcp__*`` tools
+# remain and MCP calls succeed (61 tools tested): ``--tools`` governs
+# built-ins only, so it does not hide the MCP server's tools.
+# ``--tools`` is variadic, so it goes first and a flag always follows
+# its empty value — no later token can be read as a tool name.
 #
 # Permission-mode lab notes (CC 2.1.x running as root inside Docker):
 #
@@ -453,12 +506,14 @@ _FORCE_SUBSCRIPTION_ARGS = ["--settings", _FORCE_SUBSCRIPTION_SETTINGS]
 #     option we ship.
 #
 # Allow-list note:
-#   ``--allowedTools mcp__*`` (broad MCP glob) rather than
-#   ``mcp__intellistock__*``. The broader pattern is supported across
-#   more CC versions. With ``--strict-mcp-config`` pointing only at
-#   our config, this is functionally equivalent to restricting to
-#   IntelliStock tools.
+#   ``--allowedTools mcp__*`` is kept because it is the lab-verified way
+#   MCP calls go through without a permission mode. It is the broad MCP
+#   glob rather than ``mcp__intellistock__*``: the broader pattern is
+#   supported across more CC versions. With ``--strict-mcp-config``
+#   pointing only at our config, this is functionally equivalent to
+#   restricting to IntelliStock tools.
 _MCP_FLAGS_TEMPLATE = [
+    "--tools", "",                   # disable every built-in tool
     "--strict-mcp-config",
     "--no-session-persistence",
     "--disable-slash-commands",
@@ -1000,17 +1055,26 @@ def _write_session_mcp_config(sess: "_Session") -> str:
     stays restricted (0600) — only the runtime user can read it.
     """
     cmd = _mcp_server_command_args()
+    # Claude Code starts the stdio MCP server with its own (allowlisted)
+    # environment overlaid with this block. The server needs no subscription
+    # token, so the inherited one is blanked. The confirm wait reaches the
+    # server only from here; it is int()-parsed at import, so only digits pass.
+    mcp_env = {
+        "INTELLISTOCK_MCP_URL": _mcp_callback_url(),
+        "INTELLISTOCK_MCP_TOKEN": sess.mcp_token,
+        "INTELLISTOCK_CONVERSATION_ID": sess.conversation_id,
+        "INTELLISTOCK_USER_ID": sess.user_id or "",
+        _OAUTH_TOKEN_ENV: "",
+    }
+    wait = (os.environ.get("INTELLISTOCK_MCP_CONFIRM_WAIT_SEC") or "").strip()
+    if wait.isascii() and wait.isdigit():
+        mcp_env["INTELLISTOCK_MCP_CONFIRM_WAIT_SEC"] = wait
     config = {
         "mcpServers": {
             "intellistock": {
                 "command": cmd[0],
                 "args": cmd[1:],
-                "env": {
-                    "INTELLISTOCK_MCP_URL": _mcp_callback_url(),
-                    "INTELLISTOCK_MCP_TOKEN": sess.mcp_token,
-                    "INTELLISTOCK_CONVERSATION_ID": sess.conversation_id,
-                    "INTELLISTOCK_USER_ID": sess.user_id or "",
-                },
+                "env": mcp_env,
             }
         }
     }
@@ -1093,11 +1157,15 @@ def _build_chat_argv(
 ) -> List[str]:
     """Argv for a long-lived chatbot subprocess (stream-json in & out).
 
-    When ``mcp_config_path`` is provided, CC is launched with the
-    IntelliStock MCP server attached and tools restricted to
-    ``mcp__intellistock__*`` — CC's built-in Bash/Read/Edit/etc.
-    remain disabled. Without a config path, CC runs in pure-text mode
-    (no tools at all).
+    Every mode passes ``--tools ""``, so CC's built-in tools (Bash,
+    Read, Write, Edit, WebSearch, Task, ...) are never available.
+
+    When ``mcp_config_path`` is provided, CC is also launched with the
+    IntelliStock MCP server attached (``--strict-mcp-config``) and
+    ``--allowedTools mcp__*``, the lab-verified way MCP calls go through
+    without a permission mode; the MCP tools are the only tools the
+    session has (verified on claude 2.1.328). Without a config path, CC
+    runs in pure-text mode (no tools at all).
     """
     effective_extra = _merge_extra_args_with_effort(extra_args, _normalize_effort(effort))
     if mcp_config_path:
@@ -1668,12 +1736,10 @@ class ClaudeCliSessionManager:
         # drop is explicit and visible — Popen(user=) was observed to
         # silently no-op in some container capability configurations.
         argv = _wrap_argv_for_runtime_user(argv)
-        # Build the env for the child. We override HOME so CC reads the
-        # chowned copy of ~/.claude that the runtime user can access, and
-        # we keep PATH so claude / node / python still resolve.
-        child_env = _strip_api_key_env(os.environ.copy())
-        if sess.runtime_home:
-            child_env["HOME"] = sess.runtime_home
+        # Allowlisted env for the child (no server secret reaches claude or
+        # its MCP server). HOME points at the chowned copy of ~/.claude the
+        # runtime user can read.
+        child_env = _claude_child_env(sess.runtime_home or None)
         # Diagnostic: log the actual argv head + runtime config so it's
         # obvious in the api logs whether the wrap landed.
         _log(
@@ -1907,7 +1973,8 @@ class ClaudeCliSessionManager:
         """Dispatch one NDJSON event from CC's stdout.
 
         Relevant event types observed in CC 2.1.139:
-          - ``system`` / ``system:init``: subprocess ready
+          - ``system`` / ``system:init``: subprocess ready; its ``tools``
+            list is checked, and a built-in tool refuses the session
           - ``assistant``: partial / full assistant content
           - ``result``: terminal event for the current turn
           - ``error``: terminal error for the current turn
@@ -1927,7 +1994,24 @@ class ClaudeCliSessionManager:
             err_msg = str(event.get("message") or event.get("error") or "claude error")
             self._fail_pending(sess, ClaudeCliError(err_msg))
             return
-        # system / system:init / other framing events: nothing to do.
+        if etype == "system" and event.get("subtype") == "init":
+            # Fail closed: the image installs claude-code unpinned, so a CLI
+            # upgrade could make ``--tools ""`` stop removing built-ins.
+            conv = sess.conversation_id
+            tools = event.get("tools")
+            if isinstance(tools, list):
+                _log(f"[{conv[:8]}] CC init tools: {sorted(str(t) for t in tools)}", "cyan")
+            bad = _builtin_tools_in_init(event)
+            if bad:
+                _log(f"[{conv[:8]}] CC init lists built-in tools {bad}; refusing the session", "red")
+                self._fail_pending(sess, ClaudeCliToolPolicyError(
+                    f"claude-cli exposed built-in tools {bad}; session refused "
+                    "(only mcp__* tools are allowed)"
+                ))
+                sess.state = SessionState.CRASHED
+                self._kill_process(sess)
+            return
+        # system (other subtypes) / other framing events: nothing to do.
 
     def _deliver_result(
         self,
@@ -2283,6 +2367,16 @@ def _extract_assistant_text(content: Any) -> str:
     return _coerce_text(content)
 
 
+def _builtin_tools_in_init(event: Dict[str, Any]) -> List[str]:
+    """Sorted names in a ``system:init`` event's ``tools`` that do not
+    start with ``mcp__`` (CC built-ins). ``[]`` when ``tools`` is missing
+    or not a list."""
+    tools = event.get("tools")
+    if not isinstance(tools, list):
+        return []
+    return sorted(str(t) for t in tools if not str(t).startswith("mcp__"))
+
+
 def _log(msg: str, color: str = "white") -> None:
     try:
         from intellistock_logger import intellistock_logger
@@ -2417,9 +2511,7 @@ def call_claude_cli_structured(
     _init_claude_state_once()
     runtime_home = _get_structured_runtime_home()
     argv = _wrap_argv_for_runtime_user(argv)
-    child_env = _strip_api_key_env(os.environ.copy())
-    if runtime_home and runtime_home != (os.environ.get("HOME") or "/root"):
-        child_env["HOME"] = runtime_home
+    child_env = _claude_child_env(runtime_home or None)
 
     # Per-call counter so concurrent spawns are distinguishable in logs.
     # Sonnet+reasoning_effort=high routinely takes 30-90s per structured
@@ -2935,7 +3027,7 @@ def test_claude_cli(
         ver = subprocess.run(
             [resolved_cli, "--version"],
             capture_output=True, text=True, timeout=10,
-            encoding="utf-8", errors="replace",
+            encoding="utf-8", errors="replace", env=_claude_child_env(),
             **_platform_popen_kwargs(),
         )
     except FileNotFoundError:
@@ -2976,9 +3068,7 @@ def test_claude_cli(
         *_SAFETY_FLAGS,
     ]
     argv = _wrap_argv_for_runtime_user(argv)
-    child_env = _strip_api_key_env(os.environ.copy())
-    if runtime_home and runtime_home != (os.environ.get("HOME") or "/root"):
-        child_env["HOME"] = runtime_home
+    child_env = _claude_child_env(runtime_home or None)
     try:
         try:
             proc = subprocess.run(
@@ -3132,15 +3222,15 @@ def claude_auth_status(cli_path: str = "claude") -> Dict[str, Any]:
     try:
         ver = subprocess.run(
             [resolved, "--version"], capture_output=True, text=True, timeout=10,
-            encoding="utf-8", errors="replace", **_platform_popen_kwargs(),
+            encoding="utf-8", errors="replace", env=_claude_child_env(),
+            **_platform_popen_kwargs(),
         )
         if ver.stdout:
             version = ver.stdout.strip().splitlines()[0]
     except (subprocess.TimeoutExpired, OSError):
         pass
 
-    env = _strip_api_key_env(os.environ.copy())
-    env["HOME"] = _operator_home()
+    env = _claude_child_env(_operator_home())
     try:
         res = subprocess.run(
             [resolved, "auth", "status"], capture_output=True, text=True,
@@ -3178,8 +3268,7 @@ def claude_logout(cli_path: str = "claude") -> tuple[bool, str]:
         resolved = _resolve_cli_path(cli_path or "claude")
     except ClaudeCliError as e:
         return False, str(e)
-    env = _strip_api_key_env(os.environ.copy())
-    env["HOME"] = _operator_home()
+    env = _claude_child_env(_operator_home())
     try:
         res = subprocess.run(
             [resolved, "auth", "logout"], capture_output=True, text=True,
@@ -3331,12 +3420,11 @@ class ClaudeCliLogin:
                 fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 1000, 0, 0))
             except Exception:
                 pass
-            env = _strip_api_key_env(os.environ.copy())
-            env["HOME"] = _operator_home()
+            env = _claude_child_env(_operator_home())
             env["TERM"] = "xterm-256color"
             # Discourage the CLI from trying to auto-launch a browser the
             # headless server can't reach; force the paste-code path.
-            env["BROWSER"] = env.get("BROWSER", "true")
+            env["BROWSER"] = "true"
             env["NO_BROWSER"] = "1"
             proc = subprocess.Popen(
                 [resolved, "auth", "login", "--claudeai"],
@@ -3549,6 +3637,7 @@ __all__ = [
     "ClaudeCliTimeoutError",
     "ClaudeCliCrashError",
     "ClaudeCliValidationError",
+    "ClaudeCliToolPolicyError",
     "validate_extra_args",
     "call_claude_cli_chat",
     "call_claude_cli_structured",

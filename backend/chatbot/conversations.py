@@ -3,15 +3,18 @@
 The first per-user resource in this codebase: conversations are scoped by
 ``user_id`` and queried via a secondary index. Conversations carry their
 selected model + a flat list of message documents so a single ``get`` is
-enough to render the full thread.
+enough to render the full thread. ``rev`` is an opaque token rewritten by
+every compare-and-swap write.
 """
 from __future__ import annotations
 
+import copy
 import os
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
+from db import P, StoreError
 from db import json as db_json
 from db import schema as db_schema
 from db import store
@@ -23,6 +26,20 @@ USER_INDEX = "user_id"
 # Hard cap so a runaway loop can't blow up a single conversation document.
 # Older messages are still preserved; the LLM context is trimmed separately.
 MAX_MESSAGES_PER_CONVERSATION = 2000
+
+# Message statuses a tool approval moves through. A message is claimed
+# (pending -> executing) before its tool runs, so a second approval that read
+# "pending" loses the swap instead of running the tool again.
+STATUS_PENDING = "pending_confirmation"
+STATUS_EXECUTING = "executing"
+STATUS_COMPLETE = "complete"
+
+# Lost swaps tolerated before a write gives up with ConversationBusyError.
+CAS_ATTEMPTS = 5
+
+
+class ConversationBusyError(ValueError):
+    """Every compare-and-swap attempt lost to a concurrent write."""
 
 
 def _now() -> str:
@@ -254,17 +271,107 @@ def append_messages(
          "id": store.coerce_id(TABLE, conv_id)},
     )
 
-    # Refresh and only trim if we crossed the cap. Trimming is non-atomic but
-    # idempotent — the worst-case is two writers each trim once.
+    # Trim only if we crossed the cap. The trim rewrites every message, so it
+    # goes through the compare-and-swap: a plain write from a stale read could
+    # put a claimed ("executing") message back to pending, and a later
+    # approval would run its tool again.
+    def trim(doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        msgs = doc.get("messages") or []
+        if len(msgs) <= MAX_MESSAGES_PER_CONVERSATION:
+            return None
+        doc["messages"] = _trim_to_max(msgs)
+        doc["message_count"] = len(doc["messages"])
+        return doc
+
     fresh = get_conversation(conn, user_id, conv_id)
     if fresh and len(fresh.get("messages") or []) > MAX_MESSAGES_PER_CONVERSATION:
-        trimmed = _trim_to_max(fresh["messages"])
-        store.update(TABLE, conv_id, {
-            "messages": trimmed,
-            "message_count": len(trimmed),
-        })
+        try:
+            _cas_conversation(user_id, conv_id, trim)
+        except ConversationBusyError:
+            # The batch is already written; the next append trims again.
+            pass
         fresh = get_conversation(conn, user_id, conv_id)
     return fresh
+
+
+def _token(ref, value):
+    return ref.eq(str(value)) if value is not None else ref.is_null()
+
+
+def _cas_conversation(
+    user_id: str,
+    conv_id: str,
+    mutate: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]],
+) -> Optional[Dict[str, Any]]:
+    """Read-modify-write one owner-scoped conversation as a compare-and-swap.
+
+    ``mutate`` gets a deep copy of the doc and returns the doc to write, or
+    None to write nothing. ``store.replace_if`` replaces the whole document,
+    so the guard must catch every write since the read: ``updated_at`` catches
+    append_messages / update_conversation / clear_messages, and ``rev``
+    (rewritten only here) separates two CAS writes stamped in the same
+    microsecond. A lost swap re-reads and retries.
+
+    Returns the written doc; None when the conversation is missing or not the
+    caller's, ``mutate`` declines, or the row was deleted mid-swap. Raises
+    ConversationBusyError after CAS_ATTEMPTS lost swaps.
+    """
+    for _ in range(CAS_ATTEMPTS):
+        doc = get_conversation(None, user_id, conv_id)
+        if doc is None:
+            return None
+        new = mutate(copy.deepcopy(doc))
+        if new is None:
+            return None
+        new["updated_at"], new["rev"] = _now(), uuid.uuid4().hex
+        when = (_token(P.field("updated_at"), doc.get("updated_at"))
+                & _token(P.field("rev"), doc.get("rev")))
+        try:
+            saved = store.replace_if(TABLE, conv_id, when=when, doc=new)
+        except StoreError:
+            # replace_if raises on a missing row. Only a row that is really
+            # gone reads as None: an outage must not pass for "resolved".
+            if store.get(TABLE, conv_id) is None:
+                return None
+            raise
+        if saved is not None:
+            return saved
+    raise ConversationBusyError("conversation is busy; try again")
+
+
+def transition_message(
+    conn,
+    user_id: str,
+    conv_id: str,
+    message_id: str,
+    *,
+    expect_status: str,
+    changes: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Move one message out of ``expect_status`` atomically.
+
+    The new message is ``{**old, **changes, "id": message_id}``. Returns a
+    copy of the message as it stood just before the transition; None when the
+    conversation (owner-scoped) or message is missing, the message's status is
+    not ``expect_status``, or the row vanished mid-swap. Of two callers racing
+    the same transition, exactly one gets the message back.
+    """
+    before: List[Dict[str, Any]] = []
+
+    def mutate(doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        msgs = doc.get("messages") or []
+        for i, m in enumerate(msgs):
+            if m.get("id") == message_id:
+                if m.get("status") != expect_status:
+                    return None
+                before[:] = [copy.deepcopy(m)]
+                msgs[i] = {**m, **changes, "id": message_id}
+                return doc
+        return None
+
+    if _cas_conversation(user_id, conv_id, mutate) is None:
+        return None
+    return before[0]
 
 
 def replace_message(
@@ -274,26 +381,18 @@ def replace_message(
     message_id: str,
     new_message: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    """Replace a single message by id (used to resolve pending tool calls)."""
-    doc = get_conversation(conn, user_id, conv_id)
-    if not doc:
+    """Replace a single message by id (used to resolve pending tool calls).
+
+    A compare-and-swap, so a concurrent append is retried past, not dropped."""
+    def mutate(doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        msgs = doc.get("messages") or []
+        for i, m in enumerate(msgs):
+            if m.get("id") == message_id:
+                msgs[i] = {**new_message, "id": message_id}
+                return doc
         return None
-    msgs = doc.get("messages") or []
-    found = False
-    for i, m in enumerate(msgs):
-        if m.get("id") == message_id:
-            preserved_id = m.get("id")
-            new_message = {**new_message, "id": preserved_id}
-            msgs[i] = new_message
-            found = True
-            break
-    if not found:
-        return None
-    store.update(TABLE, conv_id, {
-        "messages": msgs,
-        "updated_at": _now(),
-    })
-    return get_conversation(conn, user_id, conv_id)
+
+    return _cas_conversation(user_id, conv_id, mutate)
 
 
 def find_message(doc: Dict[str, Any], message_id: str) -> Optional[Dict[str, Any]]:
