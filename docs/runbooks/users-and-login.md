@@ -91,6 +91,104 @@ once every `.env` in use has been renamed.
    simply never read and never written again. The first-run path cannot
    fire on a deployment that has users.
 
+## Login limits behind the proxy
+
+The API counts failed attempts in memory, per process:
+
+| Limit | Default | Keys |
+|-------|---------|------|
+| Failed logins per username and client IP | 10 per 15 minutes | `LOGIN_RATE_LIMIT_MAX_ATTEMPTS`, `LOGIN_RATE_LIMIT_WINDOW_SECONDS` |
+| Failed logins per client IP, across usernames | 30 per 15 minutes, **only through a proxy `FORWARDED_ALLOW_IPS` names** (or from loopback) | `LOGIN_RATE_LIMIT_PER_IP_MAX_ATTEMPTS` |
+| Signups per client IP | 5 per hour | `SIGNUP_RATE_LIMIT_MAX_ATTEMPTS`, `SIGNUP_RATE_LIMIT_WINDOW_SECONDS` |
+
+A correct password clears that username and IP's count.
+
+### Why `FORWARDED_ALLOW_IPS` must name every proxy hop
+
+Behind a reverse proxy, every request reaches the API from the proxy's own
+address. Uvicorn replaces that address with the real client from
+`X-Forwarded-For`, but only for requests arriving from an address listed in
+`FORWARDED_ALLOW_IPS`. The default is `127.0.0.1`, which no proxy container
+is, so until it is set every client shares one address: anyone's ten wrong
+guesses lock the operator out of that username, and the per-IP limit stays
+off, because it would lock everyone out at once. The API logs a warning at
+startup (`FORWARDED_ALLOW_IPS names no reverse proxy`) while the variable
+names no proxy: unset, empty, or loopback only, which is the compose default.
+
+Name **every** hop that forwards to the API, not only Traefik:
+
+- **Traefik** (`dokploy-traefik`), for the API's public hostname.
+- **The web frontend's nginx** (`intellistock-frontend`), if the web UI
+  reaches the API through its `/api/` fallback. It does whenever the bundle
+  was built without `VITE_API_URL`.
+- **Whatever `tailscale serve`, or any other proxy, connects from** when it
+  fronts the host-published port (8011). Through Docker's published port the
+  API usually sees the Docker network's gateway, not the proxy itself.
+  Naming the gateway lets any process on the host that connects to that port
+  claim any client address.
+
+A hop that is not named never hands the API the real client: everyone behind
+it shares the hop's address. When such a request carries `X-Forwarded-For`,
+the API skips the per-IP limit for it, so the hop cannot become one lockout
+for everyone, and logs a warning once per address:
+
+```
+Login from <address> carries X-Forwarded-For, but FORWARDED_ALLOW_IPS (<value>) does not name that peer, ...
+```
+
+That address is the one to add. Until you add it, everyone behind that hop
+still shares one per-username count: ten wrong guesses at `root` from anyone
+there lock `root` out through that hop for 15 minutes.
+
+A request sent straight to the host-published port (8011) does not come from a
+listed address, so its `X-Forwarded-For` is ignored. `*`, `0.0.0.0/0`, `::/0`
+and hostnames are ignored with a warning: trusting every peer would let such a
+caller choose its own address.
+
+Find the addresses on the server (all read-only):
+
+```bash
+# Traefik, on the network it reaches the API over
+docker inspect dokploy-traefik --format '{{(index .NetworkSettings.Networks "dokploy-network").IPAddress}}'
+# the frontend's nginx, on each of its networks
+docker inspect intellistock-frontend --format '{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{$c.IPAddress}}{{"\n"}}{{end}}'
+# the gateways a published-port path (tailscale serve) arrives from
+docker inspect intellistock-api --format '{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{$c.Gateway}}{{"\n"}}{{end}}'
+# the subnet, if you name that instead
+docker network inspect dokploy-network --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+```
+
+Set `FORWARDED_ALLOW_IPS` in the stack environment to those addresses,
+comma-separated (IPs and CIDRs are accepted). A container's address can
+change when it is recreated. A subnet survives that but is looser: every
+container on it can then claim any client address.
+
+Then check every path:
+
+1. After the redeploy the API's startup log reads
+   `Proxy headers: trusting X-Forwarded-For from <your value>`, and the
+   `names no reverse proxy` warning is gone.
+2. Through each path you use (the public API hostname, the web UI, the
+   tailscale address, the iOS app), sign in once with a wrong password, then
+   with the right one.
+3. Read the log:
+
+   ```bash
+   docker logs --since 10m intellistock-api 2>&1 | grep -E 'POST /auth/login|carries X-Forwarded-For'
+   ```
+
+   Each `POST /auth/login` line must show your device's address (its public
+   or tailnet IP), not a container's or a gateway's, and no `carries X-Forwarded-For` warning may
+   appear. Either one names a hop that is still missing: add it and repeat.
+
+Repeat the check after Traefik or the frontend container is recreated, unless
+you named the subnet.
+
+### Unlocking
+
+The counts live in the API process. Restarting the api container
+(`intellistock-api`) clears every one of them.
+
 ## Troubleshooting
 
 **The login page offers to create the first account on a deployment that

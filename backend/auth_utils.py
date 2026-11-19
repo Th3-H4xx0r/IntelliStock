@@ -249,25 +249,77 @@ def verify_secret_auth_key(provided: Optional[str]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Login rate limiting
+# Login and signup rate limiting
 #
 # In-process and per-worker by design: it needs no new dependency and no shared
 # store, and the thing it defends against -- an unlimited online guessing run
-# against POST /auth/login -- is slowed by any one worker refusing. A
-# multi-worker deployment therefore allows up to max_attempts PER WORKER per
-# window; put a real limiter at the proxy if you need a hard global number.
-# State is lost on restart, which is the safe direction: a restart never locks
-# a legitimate operator out.
+# against POST /auth/login or POST /auth/signup -- is slowed by any one worker
+# refusing. A multi-worker deployment therefore allows up to max_attempts PER
+# WORKER per window; put a real limiter at the proxy if you need a hard global
+# number. State is lost on restart, which is the safe direction: a restart
+# never locks a legitimate operator out.
+#
+# Three buckets: failed logins per (username, client host); failed logins per
+# client host across usernames, which the caller can switch off (api.main
+# does when the host is a reverse proxy every client shares); and signup
+# attempts per client host, every attempt counted.
 # ---------------------------------------------------------------------------
 
 LOGIN_RATE_LIMIT_MAX_ATTEMPTS_DEFAULT = 10
 LOGIN_RATE_LIMIT_WINDOW_SECONDS_DEFAULT = 900   # 15 minutes
+LOGIN_RATE_LIMIT_PER_IP_MAX_ATTEMPTS_DEFAULT = 30
+SIGNUP_RATE_LIMIT_MAX_ATTEMPTS_DEFAULT = 5
+SIGNUP_RATE_LIMIT_WINDOW_SECONDS_DEFAULT = 3600  # 1 hour
 
-_LOGIN_ATTEMPTS: Dict[tuple, List[float]] = {}
-_LOGIN_ATTEMPTS_LOCK = threading.Lock()
-# Hard ceiling on distinct buckets so a spray across usernames or spoofed
-# hosts cannot grow the dict without bound.
-_LOGIN_ATTEMPTS_MAX_BUCKETS = 10_000
+# Once a bucket holds this many keys, recording a new key first sweeps out
+# every key that has aged out of the window, so a spray across usernames or
+# spoofed hosts does not keep growing the dict after its attempts expire.
+_ATTEMPT_BUCKETS_MAX_KEYS = 10_000
+
+
+class _AttemptBuckets:
+    """Timestamps of recent attempts per key, behind one lock."""
+
+    def __init__(self, max_keys: int = _ATTEMPT_BUCKETS_MAX_KEYS) -> None:
+        self._attempts: Dict[Any, List[float]] = {}
+        self._lock = threading.Lock()
+        self._max_keys = max_keys
+
+    def count(self, key: Any, ts: float, window: int) -> int:
+        """Attempts for key inside the window; an aged-out key is dropped."""
+        with self._lock:
+            recent = [t for t in self._attempts.get(key, ()) if t > ts - window]
+            if recent:
+                self._attempts[key] = recent
+            else:
+                self._attempts.pop(key, None)
+            return len(recent)
+
+    def record(self, key: Any, ts: float, window: int) -> int:
+        """Record one attempt for key. Returns the count now in the window."""
+        with self._lock:
+            if len(self._attempts) >= self._max_keys and key not in self._attempts:
+                # Drop every key that has fully aged out before giving up room.
+                for k in [k for k, v in self._attempts.items()
+                          if not any(t > ts - window for t in v)]:
+                    self._attempts.pop(k, None)
+            recent = [t for t in self._attempts.get(key, ()) if t > ts - window]
+            recent.append(ts)
+            self._attempts[key] = recent
+            return len(recent)
+
+    def clear(self, key: Any) -> None:
+        with self._lock:
+            self._attempts.pop(key, None)
+
+    def clear_all(self) -> None:
+        with self._lock:
+            self._attempts.clear()
+
+
+_LOGIN_ATTEMPTS = _AttemptBuckets()      # (username, host)
+_LOGIN_IP_ATTEMPTS = _AttemptBuckets()   # host, across usernames
+_SIGNUP_ATTEMPTS = _AttemptBuckets()     # host
 
 
 def _env_int(name: str, default: int) -> int:
@@ -288,51 +340,83 @@ def login_rate_limit_config() -> tuple:
     )
 
 
+def login_ip_rate_limit_max() -> int:
+    """Failed logins one client host may make across usernames per window."""
+    return _env_int("LOGIN_RATE_LIMIT_PER_IP_MAX_ATTEMPTS",
+                    LOGIN_RATE_LIMIT_PER_IP_MAX_ATTEMPTS_DEFAULT)
+
+
+def signup_rate_limit_config() -> tuple[int, int]:
+    """(max_attempts, window_seconds) for POST /auth/signup per client host."""
+    return (
+        _env_int("SIGNUP_RATE_LIMIT_MAX_ATTEMPTS",
+                 SIGNUP_RATE_LIMIT_MAX_ATTEMPTS_DEFAULT),
+        _env_int("SIGNUP_RATE_LIMIT_WINDOW_SECONDS",
+                 SIGNUP_RATE_LIMIT_WINDOW_SECONDS_DEFAULT),
+    )
+
+
+def _now(now: Optional[float]) -> float:
+    return time.time() if now is None else float(now)
+
+
+def _host_key(client_host: str) -> str:
+    return str(client_host or "unknown").strip()
+
+
 def _login_bucket_key(username: str, client_host: str) -> tuple:
-    return (str(username or "").strip().lower(), str(client_host or "unknown").strip())
+    return (str(username or "").strip().lower(), _host_key(client_host))
 
 
-def login_is_rate_limited(username: str, client_host: str, now: Optional[float] = None) -> bool:
-    """True when this username+host has used up its attempts in the window."""
+def login_is_rate_limited(username: str, client_host: str, now: Optional[float] = None,
+                          *, per_ip: bool = True) -> bool:
+    """True when this username+host has used up its attempts in the window,
+    or, with ``per_ip``, when this host has used up its attempts across
+    usernames."""
     max_attempts, window = login_rate_limit_config()
-    ts = time.time() if now is None else float(now)
-    key = _login_bucket_key(username, client_host)
-    with _LOGIN_ATTEMPTS_LOCK:
-        recent = [t for t in _LOGIN_ATTEMPTS.get(key, ()) if t > ts - window]
-        if recent:
-            _LOGIN_ATTEMPTS[key] = recent
-        else:
-            _LOGIN_ATTEMPTS.pop(key, None)
-        return len(recent) >= max_attempts
+    ts = _now(now)
+    if _LOGIN_ATTEMPTS.count(_login_bucket_key(username, client_host), ts, window) >= max_attempts:
+        return True
+    if not per_ip:
+        return False
+    return _LOGIN_IP_ATTEMPTS.count(_host_key(client_host), ts, window) >= login_ip_rate_limit_max()
 
 
-def record_failed_login(username: str, client_host: str, now: Optional[float] = None) -> int:
-    """Record one failed attempt. Returns the count now in the window."""
+def record_failed_login(username: str, client_host: str, now: Optional[float] = None,
+                        *, per_ip: bool = True) -> int:
+    """Record one failed attempt, in the host bucket too with ``per_ip``.
+    Returns the username+host count now in the window."""
     _max_attempts, window = login_rate_limit_config()
-    ts = time.time() if now is None else float(now)
-    key = _login_bucket_key(username, client_host)
-    with _LOGIN_ATTEMPTS_LOCK:
-        if len(_LOGIN_ATTEMPTS) >= _LOGIN_ATTEMPTS_MAX_BUCKETS and key not in _LOGIN_ATTEMPTS:
-            # Drop every bucket that has fully aged out before giving up room.
-            for k in [k for k, v in _LOGIN_ATTEMPTS.items()
-                      if not any(t > ts - window for t in v)]:
-                _LOGIN_ATTEMPTS.pop(k, None)
-        recent = [t for t in _LOGIN_ATTEMPTS.get(key, ()) if t > ts - window]
-        recent.append(ts)
-        _LOGIN_ATTEMPTS[key] = recent
-        return len(recent)
+    ts = _now(now)
+    if per_ip:
+        _LOGIN_IP_ATTEMPTS.record(_host_key(client_host), ts, window)
+    return _LOGIN_ATTEMPTS.record(_login_bucket_key(username, client_host), ts, window)
 
 
 def clear_login_attempts(username: str, client_host: str) -> None:
-    """Forget this bucket — called on a successful login."""
-    with _LOGIN_ATTEMPTS_LOCK:
-        _LOGIN_ATTEMPTS.pop(_login_bucket_key(username, client_host), None)
+    """Forget this username+host bucket -- called on a successful login. The
+    host's count across usernames stays, so one good password does not
+    reset a spray."""
+    _LOGIN_ATTEMPTS.clear(_login_bucket_key(username, client_host))
+
+
+def signup_is_rate_limited(client_host: str, now: Optional[float] = None) -> bool:
+    """True when this host has used up its signup attempts in the window."""
+    max_attempts, window = signup_rate_limit_config()
+    return _SIGNUP_ATTEMPTS.count(_host_key(client_host), _now(now), window) >= max_attempts
+
+
+def record_signup_attempt(client_host: str, now: Optional[float] = None) -> int:
+    """Record one signup attempt, good or bad. Returns the count now in the window."""
+    _max_attempts, window = signup_rate_limit_config()
+    return _SIGNUP_ATTEMPTS.record(_host_key(client_host), _now(now), window)
 
 
 def reset_login_rate_limit() -> None:
-    """Drop every bucket (tests, and a deliberate operator unlock)."""
-    with _LOGIN_ATTEMPTS_LOCK:
-        _LOGIN_ATTEMPTS.clear()
+    """Drop every login and signup bucket (tests, and a deliberate operator unlock)."""
+    _LOGIN_ATTEMPTS.clear_all()
+    _LOGIN_IP_ATTEMPTS.clear_all()
+    _SIGNUP_ATTEMPTS.clear_all()
 
 
 def token_version_of(user: Optional[Dict]) -> int:

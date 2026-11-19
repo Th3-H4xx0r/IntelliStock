@@ -201,6 +201,9 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
       - RETHINKDB_PORT=28015
       - API_HOST=0.0.0.0
+      # Reverse proxies whose X-Forwarded-For the API trusts; set to Traefik's
+      # address or the dokploy-network subnet (docs/runbooks/users-and-login.md).
+      - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-127.0.0.1}
       - APP_UPDATES_DIR=/app/app_updates
       # Optional: the https origin install links point at. Unset, the API uses
       # the https origin the app called it on (the proxy's X-Forwarded-*).
