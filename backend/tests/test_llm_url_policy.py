@@ -107,3 +107,31 @@ def test_guard_withholds_rather_than_refuses_for_ollama():
 def test_guard_empty_key_needs_no_check():
     assert guard_key_for_base_url("openai", key="", source="env", caller_base_url=EVIL,
                                   saved_row=None, env=NOENV) == ""
+
+
+def test_saved_row_naming_an_official_host_never_permits_http_to_it():
+    row = {"provider": "openrouter", "openrouter_base_url": "https://openrouter.ai/api/v1"}
+    assert not is_allowed_base_url("openrouter", "http://openrouter.ai/api/v1", saved_row=row, env=NOENV)
+    with pytest.raises(BaseUrlNotAllowed):
+        guard_key_for_base_url("openrouter", key="k", source="saved", caller_base_url="http://openrouter.ai/api/v1",
+                               saved_row=row, env=NOENV)
+
+def test_env_base_url_naming_an_official_host_never_permits_http_to_it():
+    env = {"OLLAMA_BASE_URL": "https://ollama.com/v1"}
+    assert not is_allowed_base_url("ollama", "http://ollama.com", env=env)
+    assert guard_key_for_base_url("ollama", key="srv", source="env", caller_base_url="http://ollama.com",
+                                  saved_row=None, env=env) == ""
+
+def test_allowlist_entry_naming_an_official_host_never_permits_http_to_it():
+    env = {"LLM_BASE_URL_ALLOWLIST": "api.openai.com,openai=openrouter.ai"}
+    assert not is_allowed_base_url("openai", "http://api.openai.com/v1", env=env)
+    assert not is_allowed_base_url("openai", "http://openrouter.ai/api/v1", env=env)  # another provider's official host
+    assert is_allowed_base_url("openai", "https://openrouter.ai/api/v1", env=env)
+
+def test_explicitly_allowed_non_official_hosts_still_accept_http():
+    assert is_allowed_base_url("openai", "http://proxy.corp:8080/v1",
+                               env={"LLM_BASE_URL_ALLOWLIST": "openai=proxy.corp"})
+    assert is_allowed_base_url("ollama", "http://192.168.1.50:11434",
+                               env={"OLLAMA_BASE_URL": "http://192.168.1.50:11434"})
+    row = {"provider": "openai", "openai_base_url": "http://llm.lan/v1"}
+    assert is_allowed_base_url("openai", "http://llm.lan/v1", saved_row=row, env=NOENV)

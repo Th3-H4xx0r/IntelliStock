@@ -10,8 +10,9 @@ A host is allowed for a provider when it is that provider's official HTTPS
 host, the code's own built-in default, the host of that provider's
 ``*_BASE_URL`` / ``AZURE_OPENAI_ENDPOINT`` environment variable, listed in
 ``LLM_BASE_URL_ALLOWLIST``, or (for a saved key only) the host saved on the
-same Models row. Host comparison ignores the port; only the official hosts
-constrain the scheme.
+same Models row. Host comparison ignores the port. An official host (any
+provider's) is only ever allowed over https; every other allowed host may use
+http as well.
 """
 
 import ipaddress
@@ -156,6 +157,10 @@ def is_allowed_base_url(provider: str, url: str, *,
     if env is None:
         env = os.environ
 
+    # An official host (whichever provider owns it) is https-only, whatever an
+    # env var, saved row or allowlist entry names.
+    if scheme != "https" and any(host in hosts for hosts in OFFICIAL_HTTPS_HOSTS.values()):
+        return False
     if scheme == "https" and host in OFFICIAL_HTTPS_HOSTS.get(p, ()):
         return True
     if host in BUILTIN_DEFAULT_HOSTS.get(p, ()):
