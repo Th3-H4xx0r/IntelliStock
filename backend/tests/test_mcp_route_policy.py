@@ -13,12 +13,13 @@ import os
 import sys
 
 from fastapi.routing import APIRoute
+from pydantic import BaseModel
 
 _BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from mcp_policy import NAME_RE, validate_policy  # noqa: E402
+from mcp_policy import NAME_RE, mcp_policy, validate_policy  # noqa: E402
 
 # The spec's direct tools: an x-mcp "tool" must name one of these.
 EXPECTED_DIRECT_TOOLS = frozenset({
@@ -89,12 +90,47 @@ def test_sensitive_routes_are_never():
                if r.path.startswith(NEVER_PREFIXES) and not (r.path == "/llm/outputs/{output_id}" and r.methods == {"GET"}))
 
 
+def _body_model(route):
+    """The type behind a route's request body, or None when it has no body.
+
+    Current FastAPI keeps it on `body_field.field_info.annotation` (its ModelField has
+    no `type_`); `type_` is the fallback for an older FastAPI that had it.
+    """
+    body_field = getattr(route, "body_field", None)
+    if body_field is None:
+        return None
+    model = getattr(getattr(body_field, "field_info", None), "annotation", None)
+    return model if model is not None else getattr(body_field, "type_", None)
+
+
+def _target_resolves(route) -> bool:
+    """True when a money route's target field is one of its path params or body fields."""
+    (field,) = _policy(route)["target"].values()
+    body_fields = set(getattr(_body_model(route), "model_fields", {}) or {})
+    return field in {x.name for x in route.dependant.path_params} | body_fields
+
+
 def test_money_targets_resolve():
     for r in _annotated():
-        p = _policy(r)
-        if p["class"] != "money":
-            continue
-        (field,) = p["target"].values()
-        body_model = getattr(getattr(r, "body_field", None), "type_", None)
-        body_fields = set(getattr(body_model, "model_fields", {}) or {})
-        assert field in {x.name for x in r.dependant.path_params} | body_fields, r.path
+        if _policy(r)["class"] == "money":
+            assert _target_resolves(r), r.path
+
+
+class _ProbeBody(BaseModel):
+    brokerage_id: str
+    note: str = ""
+
+
+def _probe_endpoint(instance_id: str, body: _ProbeBody) -> dict:
+    return {}
+
+
+def _probe_route(target: dict) -> APIRoute:
+    return APIRoute("/probe/{instance_id}", _probe_endpoint, methods=["POST"],
+                    openapi_extra=mcp_policy("money", target=target))
+
+
+def test_target_check_reads_body_and_path_fields():
+    assert _target_resolves(_probe_route({"brokerage": "brokerage_id"}))      # a body-model field
+    assert _target_resolves(_probe_route({"instance": "instance_id"}))        # a path param
+    assert not _target_resolves(_probe_route({"strategy": "strategy_id"}))    # neither
