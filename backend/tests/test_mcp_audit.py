@@ -8,7 +8,10 @@ exception's type.
 from __future__ import annotations
 
 import logging
+import re
 from unittest.mock import Mock
+
+import pytest
 
 import mcp_audit
 from mcp_audit import (
@@ -37,8 +40,83 @@ def test_is_secret_key_exact_names_and_suffixes():
     for name in ("api_key", "API_KEY", "Password", "dsn", "passphrase", "alpaca_secret",
                  "discord_bot_token", "openrouter_api_key"):
         assert is_secret_key(name), name
-    for name in ("symbol", "idempotency_key", "keys", "token_count", "monkey", "secretary"):
+    for name in ("symbol", "idempotency_key", "keys", "token_count", "monkey", "secretary",
+                 "idempotencyKey", "Idempotency-Key", "maxTokens", "public_key"):
         assert not is_secret_key(name), name
+
+
+@pytest.mark.parametrize("name", [
+    "kalshi_private_key", "kalshiPrivateKey", "KalshiPrivateKey", "kalshi-private-key",
+    "KALSHI_PRIVATE_KEY", "private_key", "privateKey", "PrivateKey", "privatekey",
+    "apiKey", "APIKey", "X-Api-Key", "x-api-key", "accessToken", "clientSecret",
+    "secret_auth_key", "secretAuthKey",
+])
+def test_camel_case_and_hyphen_variants_are_secret(name):
+    assert is_secret_key(name)
+    assert redact_secrets({name: "s3cr3t"}) == {name: "[redacted]"}
+
+
+FAKE_PEM = ("-----BEGIN RSA PRIVATE KEY-----\n"
+            "MIIEpAIBAAKCAQEAfakefakefakefakefakefakefakefakefakefakefake\n"
+            "-----END RSA PRIVATE KEY-----\n")
+
+
+@pytest.mark.parametrize("body,secrets", [
+    ({"brokerage_type": "kalshi", "account_name": "Kalshi", "kalshi_key_id": "kid-1",
+      "kalshi_private_key": FAKE_PEM, "kalshi_environment": "live"},
+     ("PRIVATE KEY", "MIIEpAIBAAKCAQEAfake")),
+    ({"brokerage_type": "alpaca", "account_name": "Alpaca", "key": "AKFAKEKEYID",
+      "secret": "SKFAKESECRET", "paper": False}, ("AKFAKEKEYID", "SKFAKESECRET")),
+])
+def test_a_link_brokerage_body_keeps_its_credentials_out_of_the_summary(body, secrets):
+    # POST /brokerages (link_brokerage, irreversible): its args_summary lives 365 days.
+    s = summarize_args({}, body)
+    assert "[redacted]" in s and not [x for x in secrets if x in s]
+    assert redact_secrets(body)["account_name"] == body["account_name"]
+
+
+# Request fields the app really takes that look secret but are not: an identifier
+# sent beside the secret it names, and an approval device's public key.
+NOT_SECRET = frozenset({"kalshi_key_id", "public_key"})
+_SECRETISH = re.compile(r"key|secret|token|passw|passphrase|private|credential|dsn|pem", re.I)
+
+
+def _request_field_names(spec: dict) -> set[str]:
+    """Every query/path parameter and request-body property name, nested models included."""
+    schemas = spec.get("components", {}).get("schemas", {})
+    names: set[str] = set()
+    seen: set[str] = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.rsplit("/", 1)[-1] not in seen:
+                seen.add(ref.rsplit("/", 1)[-1])
+                walk(schemas.get(ref.rsplit("/", 1)[-1], {}))
+            names.update((node.get("properties") or {}).keys())
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    for ops in spec["paths"].values():
+        for op in ops.values():
+            walk(op.get("requestBody") or {})
+            names.update(p["name"] for p in op.get("parameters") or [])
+    return names
+
+
+def test_every_secret_looking_request_field_of_the_app_is_redacted():
+    """Ties the list to the real API: a new request field that looks secret fails
+    here until is_secret_key catches it or NOT_SECRET names it."""
+    from api import main
+
+    names = _request_field_names(main.app.openapi())
+    assert {"kalshi_private_key", "secret", "password"} <= names       # the walk reaches bodies
+    missed = sorted(n for n in names
+                    if _SECRETISH.search(n) and n not in NOT_SECRET and not is_secret_key(n))
+    assert missed == []
 
 
 def test_summarize_args_redacts_and_truncates():

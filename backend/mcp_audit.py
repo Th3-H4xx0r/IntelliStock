@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 import uuid
 from collections.abc import Mapping
 
@@ -23,12 +24,18 @@ _log = logging.getLogger("uvicorn.error")
 AUDIT_TABLE = "McpAudit"
 REDACTED = "[redacted]"
 
+# Matched against the normalized name (see _normalize_key). "_private_key" covers
+# kalshi_private_key, the PEM key in POST /brokerages; "_auth_key" covers
+# secret_auth_key in POST /auth/signup.
 SECRET_KEY_NAMES = frozenset({
     "api_key", "secret", "secret_key", "key", "token", "access_token", "refresh_token",
-    "oauth_token", "password", "password_hash", "passphrase", "private_key", "dsn",
-    "odds_api_key", "oddspapi_api_key",
+    "oauth_token", "password", "password_hash", "passphrase", "private_key", "privatekey",
+    "dsn", "odds_api_key", "oddspapi_api_key",
 })
-SECRET_KEY_SUFFIXES = ("_api_key", "_secret", "_token")
+SECRET_KEY_SUFFIXES = ("_api_key", "_secret", "_token", "_private_key", "_auth_key")
+
+_CAMEL_ACRONYM = re.compile(r"([A-Z]+)([A-Z][a-z])")   # APIKey -> API_Key
+_CAMEL_WORD = re.compile(r"([a-z0-9])([A-Z])")         # apiKey -> api_Key
 
 OUTCOMES = frozenset({
     "ok", "error", "unauthenticated", "forbidden", "approval_required",
@@ -42,10 +49,18 @@ class _InsertRejected(Exception):
     """The store answered errors > 0 instead of raising (ReQL partial-success)."""
 
 
+def _normalize_key(name: str) -> str:
+    """snake_case, lower: kalshiPrivateKey, kalshi-private-key and X-Api-Key become
+    kalshi_private_key, kalshi_private_key and x_api_key."""
+    snake = _CAMEL_WORD.sub(r"\1_\2", _CAMEL_ACRONYM.sub(r"\1_\2", name))
+    return snake.replace("-", "_").lower()
+
+
 def is_secret_key(name: str) -> bool:
-    """True for a secret-named key: an exact name or a suffix, case-insensitive."""
-    lowered = name.lower()
-    return lowered in SECRET_KEY_NAMES or lowered.endswith(SECRET_KEY_SUFFIXES)
+    """True for a secret-named key: after normalizing case, camelCase and hyphens,
+    an exact name in SECRET_KEY_NAMES or a suffix in SECRET_KEY_SUFFIXES."""
+    normalized = _normalize_key(name)
+    return normalized in SECRET_KEY_NAMES or normalized.endswith(SECRET_KEY_SUFFIXES)
 
 
 def redact_secrets(value: object) -> object:

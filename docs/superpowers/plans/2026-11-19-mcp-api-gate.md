@@ -612,8 +612,8 @@ def test_direct_tools_are_exactly_the_expected_set():
 - Consumes: `iso_utc`, `utc_now`, `canonical_json` (Task 1); table McpAudit (Task 3).
 - Produces (`mcp_audit`):
   - `AUDIT_TABLE = "McpAudit"`.
-  - `SECRET_KEY_NAMES = frozenset({"api_key", "secret", "secret_key", "key", "token", "access_token", "refresh_token", "oauth_token", "password", "password_hash", "passphrase", "private_key", "dsn", "odds_api_key", "oddspapi_api_key"})` and `SECRET_KEY_SUFFIXES = ("_api_key", "_secret", "_token")`.
-  - `is_secret_key(name: str) -> bool` (case-insensitive exact name, or suffix).
+  - `SECRET_KEY_NAMES = frozenset({"api_key", "secret", "secret_key", "key", "token", "access_token", "refresh_token", "oauth_token", "password", "password_hash", "passphrase", "private_key", "privatekey", "dsn", "odds_api_key", "oddspapi_api_key"})` and `SECRET_KEY_SUFFIXES = ("_api_key", "_secret", "_token", "_private_key", "_auth_key")` (`_private_key` covers `kalshi_private_key`, the PEM key in `POST /brokerages`; `_auth_key` covers `secret_auth_key` in `POST /auth/signup`).
+  - `is_secret_key(name: str) -> bool`: normalize the name first (camelCase → snake_case, hyphens → underscores, lower-case, so `kalshiPrivateKey`, `kalshi-private-key`, `apiKey` and `X-Api-Key` are caught), then an exact name or a suffix.
   - `redact_secrets(value: object) -> object`: a deep copy in which every dict value under a secret key becomes `"[redacted]"`.
   - `summarize_args(query: Mapping, body: object, limit: int = 500) -> str`: the canonical JSON of `{"query", "body"}` after redaction, decoded, cut to `limit` characters, with `"…"` appended when cut.
   - `OUTCOMES = frozenset({"ok", "error", "unauthenticated", "forbidden", "approval_required", "idempotency_required", "idempotency_conflict", "idempotent_replay", "capped", "too_large", "unsupported_media", "executed_approved", "replay_refused", "auth_event", "verify_password_ok", "verify_password_failed", "verify_password_limited"})`.
@@ -627,7 +627,7 @@ def test_redact_secrets_is_deep_and_case_insensitive():
     assert got == {"Key": "[redacted]", "nested": [{"odds_api_key": "[redacted]", "symbol": "TQQQ"}], "my_token": "[redacted]"}
 
 def test_summarize_args_redacts_and_truncates():
-    s = summarize_args({"q": "1"}, {"password": "hunter2", "note": "x" * 900})
+    s = summarize_args({"q": "1"}, {"password": "hunter2", "text": "x" * 900})   # filler sorts after "password"
     assert "hunter2" not in s and "[redacted]" in s and len(s) == 501 and s.endswith("…")
 
 def test_write_audit_fills_id_and_ts(store, monkeypatch):
