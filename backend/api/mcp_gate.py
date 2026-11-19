@@ -14,7 +14,13 @@ header:
   The body is then read whole (413 past MCP_MAX_BODY_BYTES; 415 unless it is
   JSON sent as application/json, and also for JSON the gate cannot hash or
   nests deeper than MAX_JSON_DEPTH), so the money decision, a held approval and
-  the route all see the same bytes. A money call on a live, unknown or
+  the route all see the same bytes. A non-read call must carry an
+  Idempotency-Key (428 without one). A repeat of a known key runs nothing: the
+  identical request gets the stored response with X-MCP-Idempotent-Replay, any
+  other request, or one while the first still runs, a 409. Otherwise the call
+  claims the key, its completed response is stored whatever the status (a
+  held approval's 202 included), and a call that raises releases the key
+  (mcp_idempotency). A money call on a live, unknown or
   protected target, and every irreversible call, is held: a pending approval,
   a push and a 202, and the route does not run. Anything else runs with the
   principal in the ASGI scope, where ``main.get_current_user`` picks it up.
@@ -48,15 +54,17 @@ from urllib.parse import parse_qsl
 
 from fastapi import HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from starlette.routing import BaseRoute, Match
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 import auth_utils
 import mcp_approvals
+import mcp_idempotency
 from mcp_audit import summarize_args, write_audit
 from mcp_policy import (
-    McpConfig, approval_reason, canonical_request_sha256, resolve_money_state, validate_policy,
+    NON_READ_CLASSES, McpConfig, approval_reason, canonical_request_sha256, resolve_money_state,
+    validate_policy,
 )
 
 _log = logging.getLogger("uvicorn.error")
@@ -78,9 +86,6 @@ DEFAULT_CLIENT = "jarvis"
 CLIENT_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 _CORRELATION_ID_MAX = 128
 
-# Contract §2. Matched with fullmatch: `$` alone would accept a trailing newline.
-IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-
 UNAUTHENTICATED_DETAIL = "mcp: unauthenticated"
 NOT_AVAILABLE_DETAIL = "mcp: operation not available"
 NOT_EXECUTABLE_DETAIL = "mcp: approval is not executable"
@@ -88,6 +93,14 @@ TOO_LARGE_DETAIL = "mcp: request body too large"
 JSON_REQUIRED_DETAIL = "mcp: JSON body required"
 UNPROCESSABLE_DETAIL = "mcp: request body must be JSON the gate can process"
 UNPROCESSABLE_SUMMARY = "[unprocessable]"
+IDEMPOTENCY_REQUIRED_DETAIL = "mcp: Idempotency-Key required"
+IDEMPOTENCY_REUSED_DETAIL = "mcp: Idempotency-Key reused with a different request"
+IDEMPOTENCY_IN_PROGRESS_DETAIL = "mcp: Idempotency-Key request still in progress"
+REPLAY_TOO_LARGE_DETAIL = "mcp: original response too large to replay"
+IDEMPOTENT_REPLAY_HEADER = "X-MCP-Idempotent-Replay"
+# The most of a response body the gate holds for its idempotency record: one
+# byte past the cap, so finalize can still tell an over-cap body from one at it.
+_CAPTURE_LIMIT = mcp_idempotency.RESPONSE_CAP_BYTES + 1
 # Containers nested deeper than this are refused, so nothing downstream (the
 # hash, the redaction, the route) can run out of recursion on a body.
 MAX_JSON_DEPTH = 64
@@ -210,7 +223,7 @@ def _idempotency_key(scope: Scope) -> str | None:
     if len(values) != 1:
         return None
     key = values[0].decode("latin-1")
-    return key if IDEMPOTENCY_KEY_RE.fullmatch(key) else None
+    return key if mcp_idempotency.KEY_RE.fullmatch(key) else None
 
 
 class _BodyTooLarge(Exception):
@@ -316,20 +329,31 @@ def _buffered_receive(body: bytes, receive: Receive) -> Receive:
 
 
 class _ResponseCapture:
-    """A send that forwards every message unchanged and notes the status and,
-    when keep_body, the body chunks."""
+    """A send that forwards every message unchanged and notes the status, the
+    content-type and, when keep_body, the body's first _CAPTURE_LIMIT bytes (so
+    a large response is never held whole)."""
 
     def __init__(self, send: Send, *, keep_body: bool) -> None:
         self._send = send
         self._keep_body = keep_body
         self.status: int | None = None
-        self.body_chunks: list[bytes] = []
+        self.content_type: str | None = None
+        self._chunks: list[bytes] = []
+        self._kept = 0
+
+    @property
+    def body(self) -> bytes:
+        return b"".join(self._chunks)
 
     async def send(self, message: Message) -> None:
         if message["type"] == "http.response.start":
             self.status = message["status"]
-        elif message["type"] == "http.response.body" and self._keep_body:
-            self.body_chunks.append(message.get("body", b""))
+            types = [value for key, value in message.get("headers") or () if key.lower() == b"content-type"]
+            self.content_type = types[0].decode("latin-1") if types else None
+        elif message["type"] == "http.response.body" and self._keep_body and self._kept < _CAPTURE_LIMIT:
+            chunk = message.get("body", b"")[:_CAPTURE_LIMIT - self._kept]
+            self._chunks.append(chunk)
+            self._kept += len(chunk)
         await self._send(message)
 
 
@@ -470,8 +494,39 @@ class McpGateMiddleware:
         audit_fields: dict = {"args_sha256": args_sha256, "args_summary": args_summary,
                               "idempotency_key": idempotency_key}
 
-        # [Task 14: the Idempotency-Key check, lookup and claim go here.]
+        # Every non-read call names its key; a key with a live record is
+        # answered from it, and the call does not run.
+        idempotent = policy["class"] in NON_READ_CLASSES
+        idem_client = principal["client"]
+        if idempotent:
+            if idempotency_key is None:
+                await self._refuse(scope, receive, send, started, principal, operation_id,
+                                   status=428, detail=IDEMPOTENCY_REQUIRED_DETAIL,
+                                   outcome="idempotency_required", **audit_fields)
+                return
+            found = await self._store_step(scope, started, principal, operation_id, audit_fields,
+                                           mcp_idempotency.lookup, idem_client, idempotency_key,
+                                           args_sha256)
+            if found.kind != "absent":
+                await self._answer_from_record(scope, receive, send, started, principal,
+                                               operation_id, found, audit_fields)
+                return
+
         # [Task 15: the rate caps, the daily cost cap and the backtest slot go here.]
+
+        if idempotent:
+            claimed = await self._store_step(scope, started, principal, operation_id, audit_fields,
+                                             mcp_idempotency.claim, idem_client, idempotency_key,
+                                             method=scope["method"], path=scope["path"],
+                                             request_sha256=args_sha256)
+            if not claimed:
+                # Another call with this key claimed it after our lookup.
+                found = await self._store_step(scope, started, principal, operation_id, audit_fields,
+                                               mcp_idempotency.lookup, idem_client, idempotency_key,
+                                               args_sha256)
+                await self._answer_from_record(scope, receive, send, started, principal,
+                                               operation_id, found, audit_fields)
+                return
 
         money_state = None
         if policy["class"] == "money":
@@ -480,7 +535,7 @@ class McpGateMiddleware:
         reason = approval_reason(policy, money_state)
         audit_fields["money_state"] = reason or money_state
 
-        response = _ResponseCapture(send, keep_body=policy["class"] != "read")
+        response = _ResponseCapture(send, keep_body=idempotent)
         approval_id: str | None = None
         try:
             if reason is not None:
@@ -498,18 +553,64 @@ class McpGateMiddleware:
                 scope[PRINCIPAL_SCOPE_KEY] = principal
                 await self.app(scope, _buffered_receive(body, receive), response.send)
         except Exception:
-            # [Task 14: release the idempotency record here.]
+            if idempotent:
+                await _release_key(idem_client, idempotency_key)
             await _audit(scope, started, outcome="error", status=500, principal=principal,
                          operation_id=operation_id, approval_id=approval_id, **audit_fields)
             raise
-        # [Task 14: finalize the idempotency record with the captured response here.]
         status = 500 if response.status is None else response.status
+        if idempotent:
+            await _finalize_key(idem_client, idempotency_key, status, response)
         if approval_id is not None:
             outcome = "approval_required"
         else:
             outcome = "ok" if status < 400 else "error"
         await _audit(scope, started, outcome=outcome, status=status, principal=principal,
                      operation_id=operation_id, approval_id=approval_id, **audit_fields)
+
+    async def _store_step(self, scope: Scope, started: float, principal: dict,
+                          operation_id: str | None, audit_fields: dict,
+                          fn: Callable[..., object], *args: object, **kwargs: object) -> object:
+        """fn(*args, **kwargs) in the threadpool; when it raises, the call is
+        audited as a 500 before the exception propagates."""
+        try:
+            return await run_in_threadpool(fn, *args, **kwargs)
+        except Exception:
+            await _audit(scope, started, outcome="error", status=500, principal=principal,
+                         operation_id=operation_id, **audit_fields)
+            raise
+
+    async def _answer_from_record(self, scope: Scope, receive: Receive, send: Send, started: float,
+                                  principal: dict, operation_id: str | None,
+                                  found: mcp_idempotency.IdemLookup, audit_fields: dict) -> None:
+        """Answer a call whose key has a live record, without running it.
+
+        A replay gets the stored status, body and content-type (a too_large
+        record its status and REPLAY_TOO_LARGE_DETAIL), marked by
+        IDEMPOTENT_REPLAY_HEADER. A conflict is a 409, and so is a record still
+        in progress or one gone since the claim was lost: no call runs without
+        its own claim.
+        """
+        if found.kind != "replay":
+            detail = (IDEMPOTENCY_REUSED_DETAIL if found.kind == "conflict"
+                      else IDEMPOTENCY_IN_PROGRESS_DETAIL)
+            await self._refuse(scope, receive, send, started, principal, operation_id, status=409,
+                               detail=detail, outcome="idempotency_conflict", **audit_fields)
+            return
+        row = found.record
+        status = row["status"]
+        headers = {IDEMPOTENT_REPLAY_HEADER: "true"}
+        if row.get("too_large"):
+            reply: Response = JSONResponse({"detail": REPLAY_TOO_LARGE_DETAIL}, status_code=status,
+                                           headers=headers)
+        else:
+            if row.get("content_type"):
+                headers["content-type"] = row["content_type"]
+            reply = Response((row.get("body_text") or "").encode("utf-8"), status_code=status,
+                             headers=headers)
+        await reply(scope, receive, send)
+        await _audit(scope, started, outcome="idempotent_replay", status=status, principal=principal,
+                     operation_id=operation_id, **audit_fields)
 
     async def _replay(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Run an approved call the decision route replays in-process, exactly once.
@@ -603,6 +704,27 @@ async def _create_held_approval(scope: Scope, cfg: McpConfig, *, principal: dict
         # The type only: a message can quote the summary.
         _log.warning("mcp: approval push not started (%s)", type(exc).__name__)
     return row
+
+
+async def _release_key(client: str, key: str) -> None:
+    """Release the key of a call that raised, so a retry can run. Never raises:
+    the call's own exception is the one that matters."""
+    try:
+        await run_in_threadpool(mcp_idempotency.release, client, key)
+    except Exception as exc:
+        _log.warning("mcp: idempotency key not released (%s); it stays in progress", type(exc).__name__)
+
+
+async def _finalize_key(client: str, key: str, status: int, response: _ResponseCapture) -> None:
+    """Store the call's completed response on its key. Never raises: the
+    response has gone out, and a key left in progress turns a retry into a 409,
+    never a second run."""
+    try:
+        await run_in_threadpool(mcp_idempotency.finalize, client, key, status=status,
+                                content_type=response.content_type, body=response.body)
+    except Exception as exc:
+        _log.warning("mcp: idempotency record not finalized (%s); it stays in progress",
+                     type(exc).__name__)
 
 
 def require_mcp_service(request: Request) -> None:
