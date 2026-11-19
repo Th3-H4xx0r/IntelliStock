@@ -10,8 +10,13 @@ refused.
 A passkeys row is (credential_id, user_id, public_key = the COSE key,
 sign_count, transports = a JSON array of transport names, created_at,
 last_used_at). Enrollment writes it from a NewPasskey; this module reads it and,
-after each sign-in, moves sign_count and last_used_at. A registration whose
-credential id is already stored, for any user, is refused (WebAuthn section 7.1).
+after each sign-in, moves sign_count and last_used_at.
+
+Registration options exclude no credentials. Enrollment replaces all of a
+user's factors and removes the old passkeys when it completes; listing them in
+excludeCredentials would make every device holding one (every synced device,
+for a synced passkey) refuse to register again. A registration whose credential
+id is already stored, for any user, is still refused (WebAuthn section 7.1).
 
 An assertion counts only for its own user: the row is looked up by credential
 id AND user_id. A counter that does not move forward is refused as a replay or
@@ -91,7 +96,8 @@ class PasskeyService:
                 resident_key=ResidentKeyRequirement.PREFERRED,
                 user_verification=UserVerificationRequirement.REQUIRED,
             ),
-            exclude_credentials=self._descriptors(user_id),
+            # Nothing excluded: a re-enrollment must be able to register on the device holding the old passkey.
+            exclude_credentials=[],
             supported_pub_key_algs=PUB_KEY_ALGS,
             timeout=CEREMONY_TIMEOUT_MS,
         )

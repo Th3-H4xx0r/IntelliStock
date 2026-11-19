@@ -11,7 +11,7 @@ import mcp_server.passkeys as passkeys_module
 from conftest import FakeClock
 from mcp_server.authdb import AuthDB
 from mcp_server.passkeys import NewPasskey, PasskeyError, PasskeyService
-from webauthn_fake import SoftAuthenticator
+from webauthn_fake import InvalidStateError, SoftAuthenticator
 
 START = 1_800_000_000.0
 USER = "u-123"
@@ -306,22 +306,39 @@ def test_store_error_raises_rather_than_failing(passkeys, db, users, authenticat
         passkeys.verify_authentication(USER, assertion, challenge)
 
 
-def test_options_require_uv_and_exclude_existing(passkeys, db, users, authenticator, settings):
+def test_reregistering_on_the_same_device_succeeds(passkeys, db, users, authenticator):
+    # Re-enrollment replaces all factors, so the device holding the old passkey (every device, for a synced
+    # passkey) must be able to register again.
+    old = _register(passkeys, db, authenticator)
+    options, challenge = passkeys.registration_options(user_id=USER, username="operator")
+    new = passkeys.verify_registration(authenticator.create(options), challenge)
+    assert new.credential_id != old.credential_id
+    # As enrollment completes: the user's old passkeys go and the new one is stored.
+    db.query("DELETE FROM passkeys WHERE user_id = ?", (USER,))
+    _store(db, USER, new)
+    assert _sign_in(passkeys, authenticator) is True
+    assert _row(db, new)["sign_count"] == 1
+    # The fake refuses a creation that excludes a credential it holds, as a browser does, so options that
+    # listed the user's passkeys again would fail this test above.
+    excluded = json.loads(passkeys.registration_options(user_id=USER, username="operator")[0])
+    excluded["excludeCredentials"] = [{"id": _b64url(new.credential_id), "type": "public-key"}]
+    with pytest.raises(InvalidStateError):
+        authenticator.create(json.dumps(excluded))
+
+
+def test_options_require_uv_and_exclude_nothing(passkeys, db, users, authenticator, settings):
     passkey = _register(passkeys, db, authenticator)
     options, challenge = passkeys.registration_options(user_id=USER, username="operator")
     parsed = json.loads(options)
     assert parsed["authenticatorSelection"]["userVerification"] == "required"
     assert parsed["authenticatorSelection"]["residentKey"] == "preferred"
-    assert parsed["excludeCredentials"] == [
-        {"id": _b64url(passkey.credential_id), "type": "public-key", "transports": ["internal"]}]
+    assert parsed["excludeCredentials"] == []  # enrollment replaces all factors; see the re-registration test
     assert parsed["rp"] == {"id": settings.rp_id, "name": "IntelliStock MCP"}
     assert parsed["user"] == {"id": _b64url(USER.encode()), "name": "operator", "displayName": "operator"}
     assert parsed["challenge"] == _b64url(challenge) and len(challenge) >= 32
     assert [p["alg"] for p in parsed["pubKeyCredParams"]] == [-7, -8]  # ES256, EdDSA
     assert (parsed["timeout"], parsed["attestation"]) == (120000, "none")
     assert passkeys.registration_options(user_id=USER, username="operator")[1] != challenge
-    # Only the user's own passkeys are excluded.
-    assert json.loads(passkeys.registration_options(user_id=OTHER, username="other")[0])["excludeCredentials"] == []
 
     options, challenge = passkeys.authentication_options(USER)
     parsed = json.loads(options)

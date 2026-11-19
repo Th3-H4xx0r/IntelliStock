@@ -10,7 +10,9 @@ py_webauthn, so the server's checks run against an independent implementation.
 rp_id, origin, user_verified and sign_count are plain attributes. A test
 changes them to play a foreign RP ID, a phishing origin, an authenticator that
 skipped user verification, or a clone whose counter runs behind. The options'
-own RP ID is not checked: authData always hashes self.rp_id.
+own RP ID is not checked: authData always hashes self.rp_id. Like a browser,
+create() refuses with InvalidStateError when excludeCredentials lists a
+credential this authenticator holds.
 """
 import base64
 import hashlib
@@ -26,6 +28,10 @@ FLAG_UV = 0x04
 FLAG_AT = 0x40
 ES256 = -7
 TRANSPORTS = ["internal"]
+
+
+class InvalidStateError(Exception):
+    """The browser's InvalidStateError: the authenticator holds a credential the options exclude."""
 
 
 def b64url(data: bytes) -> str:
@@ -54,6 +60,9 @@ class SoftAuthenticator:
         options = json.loads(options_json)
         if ES256 not in [param.get("alg") for param in options["pubKeyCredParams"]]:
             raise ValueError("NotSupportedError: the options do not offer ES256")
+        excluded = {b64url_decode(entry["id"]) for entry in options.get("excludeCredentials") or []}
+        if excluded & self._credentials.keys():
+            raise InvalidStateError("this authenticator already holds an excluded credential")
         key = ec.generate_private_key(ec.SECP256R1())
         credential_id = os.urandom(32)
         public = key.public_key().public_numbers()
