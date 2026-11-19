@@ -97,6 +97,17 @@ def _throwaway_schema():
             os.environ["PG_DSN"] = prior_dsn
 
 
+@pytest.fixture(autouse=True)
+def _fresh_mcp_caps(monkeypatch):
+    """Every test starts with empty MCP caps. mcp_caps.caps holds the per-minute
+    windows and daily counts of one api process, so without this one test's MCP
+    calls would refuse the next test's. Only a module already imported is reset:
+    one imported during the test starts empty anyway."""
+    module = sys.modules.get("mcp_caps")
+    if module is not None:
+        monkeypatch.setattr(module, "caps", module.McpCaps())
+
+
 @pytest.fixture
 def pg_schema():
     """A throwaway schema with no tables in it. Yields the schema name."""

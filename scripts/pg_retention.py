@@ -5,7 +5,8 @@ Every RetentionSpec whose env var is set gets a batched, indexed, ranged
 delete. Retention is OFF for every cache table until the operator sets the
 env var -- the registry's default_days is None everywhere except
 LearningObservations, which already has a 90-day policy in
-backend/self_learning/retention.py.
+backend/self_learning/retention.py, and the MCP gate's McpIdempotency (1 day)
+and McpAudit (365 days). Nothing schedules this sweeper; it runs when invoked.
 
 Three rules, all load-bearing:
 
