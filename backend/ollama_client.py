@@ -9,6 +9,9 @@ Used by:
   * backend/api/main.py — the ``POST /ollama/list-models`` endpoint
   * backend/llm_utils.py — ``_call_ollama`` imports the exception classes;
     ``_make_ollama_sync_client`` uses ``NoAmbientAuthorization``
+
+The clients here send only the key their caller passes, never the server's
+``OLLAMA_API_KEY`` (see ``_client_kwargs``).
 """
 
 from __future__ import annotations
@@ -58,6 +61,18 @@ class NoAmbientAuthorization(httpx.Auth):
     def auth_flow(self, request: httpx.Request):
         request.headers.pop("Authorization", None)
         yield request
+
+
+def _client_kwargs(api_key: Optional[str]) -> dict[str, Any]:
+    """Keyword arguments for an ``AsyncClient`` that sends only ``api_key``.
+
+    With no key, the SDK would attach ``OLLAMA_API_KEY`` from the
+    environment; ``NoAmbientAuthorization`` drops it.
+    """
+    kwargs: dict[str, Any] = {"headers": _auth_headers(api_key)}
+    if not api_key:
+        kwargs["auth"] = NoAmbientAuthorization()
+    return kwargs
 
 
 _CONTEXT_LENGTH_SUFFIX = ".context_length"
@@ -116,8 +131,8 @@ async def list_models(
     """Return installed models. If <=20, also enrich each with ``context_length``."""
     client = AsyncClient(
         host=base_url,
-        headers=_auth_headers(api_key),
         timeout=timeout_sec,
+        **_client_kwargs(api_key),
     )
     try:
         resp = await client.list()
@@ -179,8 +194,8 @@ async def show_model(
     """Return /api/show for a specific model (raw response, no projection)."""
     client = AsyncClient(
         host=base_url,
-        headers=_auth_headers(api_key),
         timeout=timeout_sec,
+        **_client_kwargs(api_key),
     )
     try:
         resp = await client.show(model)

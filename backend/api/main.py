@@ -2998,38 +2998,44 @@ async def api_ollama_list_models(
 ):
     """Discovery endpoint: list models installed on an Ollama host.
 
-    Body: ``{"base_url": str, "api_key": str | null}``. The api_key is
-    only consulted when the host is Ollama Cloud (``ollama.com``); local
-    hosts ignore it.
+    Body: ``{"base_url": str, "api_key": str | null}``. A key in the body
+    goes to ``base_url`` whatever it is. Without one, the server's
+    ``OLLAMA_API_KEY`` goes only to a host llm_url_policy allows for
+    ollama; any other host is called with no key.
 
     Returns: ``{"models": [{"name", "model", "size_bytes",
     "parameter_size", "quantization_level", "context_length"}, …]}``.
 
-    Errors:
-      * 401 if Ollama Cloud rejects the key.
+    Errors carry fixed text; the API log has the upstream detail:
+      * 400 if llm_url_policy.parse_base_url refuses ``base_url`` (not
+        http(s), no host, credentials, or a link-local address).
+      * 401 if the host rejects the key.
       * 502 if the host is unreachable or returns an upstream error.
     """
     try:
-        models = await ollama_client.list_models(body.base_url, body.api_key)
+        host = parse_base_url(body.base_url)[1]
+    except BaseUrlInvalid as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if body.api_key:
+        api_key = body.api_key
+    elif is_allowed_base_url("ollama", body.base_url):
+        api_key = os.environ.get("OLLAMA_API_KEY")
+    else:
+        api_key = None
+    try:
+        models = await ollama_client.list_models(body.base_url, api_key)
         return {"models": models}
-    except ollama_client.OllamaAuthError:
-        return JSONResponse(
-            status_code=401,
-            content={"error": "Authentication failed"},
-        )
+    except ollama_client.OllamaAuthError as e:
+        failure, status, error = e, 401, "Authentication failed"
     except ollama_client.OllamaConnectionError as e:
-        return JSONResponse(
-            status_code=502,
-            content={
-                "error": f"Could not reach Ollama at {body.base_url}",
-                "detail": str(e),
-            },
-        )
+        failure, status, error = e, 502, "Could not reach the Ollama host"
     except ollama_client.OllamaProviderError as e:
-        return JSONResponse(
-            status_code=502,
-            content={"error": str(e)},
-        )
+        failure, status, error = e, 502, "The Ollama host returned an error"
+    import logging
+    logging.getLogger("uvicorn.error").warning(
+        "Ollama list-models for host %r failed: %r (cause: %r)",
+        host, str(failure), failure.__cause__)
+    return JSONResponse(status_code=status, content={"error": error})
 
 
 class BedrockListModelsBody(BaseModel):
@@ -3057,7 +3063,7 @@ def api_bedrock_list_models(
     Returns: ``{"models": [{"id", "name", "provider_name", "kind",
     "supports_tools", "modalities"}, …]}``.
 
-    Errors:
+    Errors carry fixed text; the API log has the upstream detail:
       * 401 if the key is rejected OR lacks ``bedrock:ListFoundationModels``
         (Bedrock API keys can be narrowly scoped). The UI treats this as
         "discovery unavailable" and falls back to manual model-id entry.
@@ -3067,20 +3073,16 @@ def api_bedrock_list_models(
         models = bedrock_client.list_models(body.api_key, body.region)
         return {"models": models}
     except bedrock_client.BedrockAuthError as e:
-        return JSONResponse(
-            status_code=401,
-            content={"error": "Authentication failed", "detail": str(e)},
-        )
+        failure, status = e, 401
+        error = "Authentication failed (the key may lack bedrock:ListFoundationModels)"
     except bedrock_client.BedrockConnectionError as e:
-        return JSONResponse(
-            status_code=502,
-            content={"error": f"Could not reach Bedrock in {body.region}", "detail": str(e)},
-        )
+        failure, status, error = e, 502, f"Could not reach Bedrock in {body.region}"
     except bedrock_client.BedrockProviderError as e:
-        return JSONResponse(
-            status_code=502,
-            content={"error": str(e)},
-        )
+        failure, status, error = e, 502, "Bedrock returned an error"
+    import logging
+    logging.getLogger("uvicorn.error").warning(
+        "Bedrock list-models in region %r failed: %r", body.region, str(failure))
+    return JSONResponse(status_code=status, content={"error": error})
 
 
 class OpenRouterListModelsBody(BaseModel):
@@ -3105,8 +3107,15 @@ def api_openrouter_list_models(
     Returns: ``{"models": [{"id", "name", "context_length", "pricing"}, …],
     "error": str | null}``. ``pricing`` is the raw OpenRouter object (USD per
     token, string values) so the UI can auto-fill the per-row cost overrides.
-    On any failure ``models`` is ``[]`` and the UI falls back to manual entry.
+    On any failure ``models`` is ``[]`` and the UI falls back to manual entry,
+    except that a non-blank ``base_url`` llm_url_policy.parse_base_url refuses
+    is a 400.
     """
+    if (body.base_url or "").strip():
+        try:
+            parse_base_url(body.base_url)
+        except BaseUrlInvalid as e:
+            raise HTTPException(status_code=400, detail=str(e))
     base_url = str((body.base_url or openrouter_client.DEFAULT_BASE_URL)).strip()
     models = openrouter_client.list_models(base_url)
     return {"models": models, "error": None if models else "No models returned (discovery unavailable)"}
