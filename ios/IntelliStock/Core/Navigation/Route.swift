@@ -72,6 +72,8 @@ nonisolated enum Route: Hashable, Sendable {
     case tokenUsage
     case settings
     case notificationSettings
+    /// Settings › Jarvis approvals.
+    case approvalDevices
     /// `/connect` pushed from Settings to change the server URL.
     case connect
     /// `/onboarding` pushed from the dashboard's onboarding panel.
@@ -111,6 +113,7 @@ nonisolated enum Route: Hashable, Sendable {
             case "stock": self = .stock(StockRoute(symbol: id))
             case "analysis": self = .analysis(id)
             case "settings" where id == "notifications": self = .notificationSettings
+            case "settings" where id == "approval-devices": self = .approvalDevices
             default: return nil
             }
         case 3:

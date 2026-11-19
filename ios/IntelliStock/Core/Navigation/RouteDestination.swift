@@ -30,6 +30,7 @@ struct RouteDestination: View {
         case .tokenUsage: TokenUsageView()
         case .settings: SettingsView()
         case .notificationSettings: NotificationSettingsView()
+        case .approvalDevices: ApprovalDeviceSettingsView()
         case .connect: ConnectView()
         case .onboarding: OnboardingView()
         }

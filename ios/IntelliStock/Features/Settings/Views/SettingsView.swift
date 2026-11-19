@@ -66,6 +66,11 @@ struct SettingsView: View {
                         .font(DS.Font.body)
                         .foregroundStyle(DS.Text.secondary)
                 }
+
+                NavigationLink(value: Route.approvalDevices) {
+                    SettingsRow(icon: "verified_user", tile: "checkmark.shield", title: "Jarvis approvals",
+                                subtitle: "Approve agent actions with Face ID on this iPhone") { EmptyView() }
+                }
             }
 
             DSSection("Preferences") {

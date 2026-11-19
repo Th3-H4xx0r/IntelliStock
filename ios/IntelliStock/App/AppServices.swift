@@ -75,6 +75,11 @@ final class AppServices {
         widgetSync: widgetSync
     )
 
+    /// Signs approval decisions: the Secure Enclave on a device, a software key on the simulator.
+    @ObservationIgnored private(set) lazy var approvalSigner: any ApprovalSigner = ApprovalSigners.platformDefault(storage: storage)
+    /// This iPhone's approver registration, per server.
+    @ObservationIgnored private(set) lazy var approvalDeviceStore = ApprovalDeviceStore(storage: storage)
+
     // MARK: Shared models
     //
     // keepAlive view models shared across screens. Each reads its repository
