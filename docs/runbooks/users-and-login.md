@@ -91,6 +91,53 @@ once every `.env` in use has been renamed.
    simply never read and never written again. The first-run path cannot
    fire on a deployment that has users.
 
+## Login limits behind the proxy
+
+The API counts failed attempts in memory, per process:
+
+| Limit | Default | Keys |
+|-------|---------|------|
+| Failed logins per username and client IP | 10 per 15 minutes | `LOGIN_RATE_LIMIT_MAX_ATTEMPTS`, `LOGIN_RATE_LIMIT_WINDOW_SECONDS` |
+| Failed logins per client IP, across usernames | 30 per 15 minutes, **only once `FORWARDED_ALLOW_IPS` names the proxy** | `LOGIN_RATE_LIMIT_PER_IP_MAX_ATTEMPTS` |
+| Signups per client IP | 5 per hour | `SIGNUP_RATE_LIMIT_MAX_ATTEMPTS`, `SIGNUP_RATE_LIMIT_WINDOW_SECONDS` |
+
+A correct password clears that username and IP's count.
+
+### Why `FORWARDED_ALLOW_IPS` must name Traefik
+
+Behind Traefik, every request reaches the API from Traefik's container
+address. Uvicorn replaces that address with the real client from
+`X-Forwarded-For`, but only for requests arriving from an address listed in
+`FORWARDED_ALLOW_IPS`. The default is `127.0.0.1`, which Traefik is not, so
+until it is set every client shares one address: anyone's ten wrong guesses
+lock the operator out of that username, and the per-IP limit stays off,
+because it would lock everyone out at once. The API logs a warning at startup
+while the variable is unset.
+
+A request sent straight to the host-published port (8011) does not come from a
+listed address, so its `X-Forwarded-For` is ignored. `*`, `0.0.0.0/0`, `::/0`
+and hostnames are ignored with a warning: trusting every peer would let such a
+caller choose its own address.
+
+Find Traefik's address on the server (both commands are read-only):
+
+```bash
+docker inspect dokploy-traefik --format '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}'
+docker network inspect dokploy-network --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+```
+
+Set `FORWARDED_ALLOW_IPS` in the stack environment to Traefik's IP if it is
+stable, otherwise to the subnet (comma-separated IPs and CIDRs are accepted).
+The subnet is looser: every container on `dokploy-network` can then claim any
+client address. After the redeploy the API's startup log reads
+`Proxy headers: trusting X-Forwarded-For from <your value>`, and its access
+log shows client addresses instead of Traefik's.
+
+### Unlocking
+
+The counts live in the API process. Restarting the api container
+(`intellistock-api`) clears every one of them.
+
 ## Troubleshooting
 
 **The login page offers to create the first account on a deployment that

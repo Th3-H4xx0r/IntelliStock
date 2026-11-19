@@ -7756,5 +7756,6 @@ API_URL = os.environ.get("API_URL", "").strip() or ("http://%s:%d" % (API_HOST i
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host=API_HOST, port=API_PORT)
+    from api.server_config import build_uvicorn_config, run_server
+
+    run_server(build_uvicorn_config(app, host=API_HOST, port=API_PORT, proxy_headers=True))
