@@ -139,9 +139,9 @@ PUBLIC_ROUTES = {
     ("POST", "/llm/outputs"):
         "loopback-only (_require_loopback): llm_utils posts to it in-process",
     ("POST", "/chatbot/internal/mcp-tools-list"):
-        "authenticated by the MCP session token, not a user session",
+        "loopback-only (_require_loopback) and authenticated by the MCP session token",
     ("POST", "/chatbot/internal/mcp-tool-call"):
-        "authenticated by the MCP session token, not a user session",
+        "loopback-only (_require_loopback) and authenticated by the MCP session token",
 }
 
 # A token that is syntactically a bearer token and cryptographically nothing.

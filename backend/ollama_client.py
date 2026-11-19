@@ -7,7 +7,11 @@ classes that both modules raise.
 
 Used by:
   * backend/api/main.py — the ``POST /ollama/list-models`` endpoint
-  * backend/llm_utils.py — ``_call_ollama`` imports the exception classes
+  * backend/llm_utils.py — ``_call_ollama`` imports the exception classes;
+    ``_make_ollama_sync_client`` uses ``NoAmbientAuthorization``
+
+The clients here send only the key their caller passes, never the server's
+``OLLAMA_API_KEY`` (see ``_client_kwargs``).
 """
 
 from __future__ import annotations
@@ -41,6 +45,34 @@ def _auth_headers(api_key: Optional[str]) -> dict[str, str]:
     if api_key:
         return {"Authorization": f"Bearer {api_key}"}
     return {}
+
+
+class NoAmbientAuthorization(httpx.Auth):
+    """Drop any ``Authorization`` header from each request before it is sent.
+
+    The ollama SDK copies ``OLLAMA_API_KEY`` from the environment into a
+    client's default headers whenever the caller passes no key. A caller
+    that must not send the server's key to a host someone else chose passes
+    ``auth=NoAmbientAuthorization()`` to the client. httpx runs the auth
+    flow after merging the client's headers into the request, so the header
+    never leaves. Works for both ``httpx.Client`` and ``httpx.AsyncClient``.
+    """
+
+    def auth_flow(self, request: httpx.Request):
+        request.headers.pop("Authorization", None)
+        yield request
+
+
+def _client_kwargs(api_key: Optional[str]) -> dict[str, Any]:
+    """Keyword arguments for an ``AsyncClient`` that sends only ``api_key``.
+
+    With no key, the SDK would attach ``OLLAMA_API_KEY`` from the
+    environment; ``NoAmbientAuthorization`` drops it.
+    """
+    kwargs: dict[str, Any] = {"headers": _auth_headers(api_key)}
+    if not api_key:
+        kwargs["auth"] = NoAmbientAuthorization()
+    return kwargs
 
 
 _CONTEXT_LENGTH_SUFFIX = ".context_length"
@@ -99,8 +131,8 @@ async def list_models(
     """Return installed models. If <=20, also enrich each with ``context_length``."""
     client = AsyncClient(
         host=base_url,
-        headers=_auth_headers(api_key),
         timeout=timeout_sec,
+        **_client_kwargs(api_key),
     )
     try:
         resp = await client.list()
@@ -162,8 +194,8 @@ async def show_model(
     """Return /api/show for a specific model (raw response, no projection)."""
     client = AsyncClient(
         host=base_url,
-        headers=_auth_headers(api_key),
         timeout=timeout_sec,
+        **_client_kwargs(api_key),
     )
     try:
         resp = await client.show(model)

@@ -40,6 +40,14 @@ from llm_utils import (
     normalize_reasoning_effort,
     resolve_api_key_for_provider,
 )
+from llm_url_policy import (
+    ROW_BASE_URL_FIELD,
+    BaseUrlInvalid,
+    BaseUrlNotAllowed,
+    guard_key_for_base_url,
+    is_allowed_base_url,
+    parse_base_url,
+)
 from db import pool as db_pool
 from db import store as db_store
 from db.store import P as _Pred
@@ -56,6 +64,8 @@ from auth_utils import (
     create_access_token,
     login_is_rate_limited,
     record_failed_login,
+    record_signup_attempt,
+    signup_is_rate_limited,
     token_version_of,
     decode_access_token,
     renewed_token_if_stale,
@@ -65,6 +75,7 @@ from auth_utils import (
     set_onboarding_completed,
     MIN_PASSWORD_LENGTH,
 )
+from api.server_config import trusted_proxy_configured, trusted_proxy_entries
 from strategies_meta import get_available_strategies
 from stock_credential_boundary import StockCredentialError
 # Module level so it is monkeypatchable, and because it imports nothing heavier
@@ -1028,12 +1039,23 @@ class UpdateBrokerageBody(BaseModel):
     alpaca_data_feed: Optional[str] = Field(default=None, pattern="^(iex|sip)$")
 
 
+#: Headers a proxy adds on the way in. Traefik sets them on every request it
+#: forwards; the in-container callers (llm_utils, the chatbot MCP server) never do.
+_FORWARDING_HEADERS = ("x-forwarded-for", "forwarded", "x-real-ip")
+
+
 def _require_loopback(request) -> None:
     """Reject anything that did not originate inside the container.
 
-    llm_utils posts raw model output to this endpoint over plain HTTP with no
-    token; adding auth would break that caller, so the boundary is the network
-    instead. Without it the route is an unauthenticated disk-fill primitive.
+    llm_utils posts raw model output to /llm/outputs over plain HTTP with no
+    token, and the chatbot MCP server calls /chatbot/internal/* back over
+    loopback; the boundary for them is the network. Without it /llm/outputs
+    is an unauthenticated disk-fill primitive.
+
+    A loopback peer is not enough. Behind a trusted proxy uvicorn rewrites the
+    client address from X-Forwarded-For, so a forged "127.0.0.1" sent through
+    it would read as loopback here. A request carrying any forwarding header
+    came through a proxy, and is refused whatever its client address says.
     """
     host = ""
     try:
@@ -1041,6 +1063,12 @@ def _require_loopback(request) -> None:
     except Exception:
         host = ""
     if host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="loopback only")
+    try:
+        forwarded = any(name in request.headers for name in _FORWARDING_HEADERS)
+    except Exception:
+        forwarded = True
+    if forwarded:
         raise HTTPException(status_code=403, detail="loopback only")
 
 
@@ -1367,9 +1395,121 @@ def api_help():
 # --- Auth endpoints (signup/login public; rest protected) ---
 
 
+def _client_host(request: Request | None) -> str:
+    """The peer address uvicorn hands the route, or "unknown".
+
+    Behind Traefik that is Traefik's own address unless FORWARDED_ALLOW_IPS
+    names it, in which case uvicorn has already swapped in the client from
+    X-Forwarded-For (api.server_config).
+    """
+    try:
+        if request is not None and request.client is not None:
+            return str(request.client.host or "unknown")
+    except Exception:
+        pass
+    return "unknown"
+
+
+# Peers already named in an unnamed-proxy warning (_from_unnamed_proxy).
+# Capped, so a stream of distinct peers cannot grow it without bound; past the
+# cap new peers are still treated as unnamed proxies, just not logged.
+_UNNAMED_PROXY_WARNED: set = set()
+_UNNAMED_PROXY_WARNED_MAX = 256
+
+
+def _forwarded_for_hosts(request: Request | None) -> set:
+    """Every X-Forwarded-For entry on the request, as written and as uvicorn reads it.
+
+    Uvicorn sets ``request.client`` to one entry's host, without a ``:port``
+    or IPv6 brackets, so both spellings are kept. Every header line counts.
+    """
+    hosts: set = set()
+    try:
+        values = request.headers.getlist("x-forwarded-for")
+    except Exception:
+        return hosts
+    for value in values:
+        for entry in str(value).split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            hosts.add(entry)
+            if entry.startswith("["):
+                end = entry.find("]")
+                if end > 1:
+                    hosts.add(entry[1:end])
+            elif entry.count(":") == 1:
+                hosts.add(entry.split(":", 1)[0])
+    return hosts
+
+
+def _from_unnamed_proxy(request: Request | None, client_host: str) -> bool:
+    """Whether the request came through a proxy FORWARDED_ALLOW_IPS does not name.
+
+    Uvicorn replaces the client address with an X-Forwarded-For entry only
+    for a peer named there. A request that carries the header while its client
+    is none of the entries was passed on by a hop that is not named: the web
+    frontend's nginx ``/api/`` fallback, a ``tailscale serve`` path onto the
+    published port, or Traefik after its address changed. Every client behind
+    that hop shares its address. Logs one warning per peer, naming the address
+    to add. A direct caller can forge the header to land here, which only
+    takes it back to the per-(username, IP) limit. A client behind the hop
+    that writes the hop's own address into the header is not caught here, so
+    its failures count against the hop's address; but only requests that list
+    the hop are ever checked against that count, so it locks out no one else.
+    """
+    hosts = _forwarded_for_hosts(request)
+    if not hosts or client_host in hosts:
+        return False
+    if (client_host not in _UNNAMED_PROXY_WARNED
+            and len(_UNNAMED_PROXY_WARNED) < _UNNAMED_PROXY_WARNED_MAX):
+        _UNNAMED_PROXY_WARNED.add(client_host)
+        import logging
+        logging.getLogger("uvicorn.error").warning(
+            "Login from %s carries X-Forwarded-For, but FORWARDED_ALLOW_IPS (%s) does "
+            "not name that peer, so every client behind it shares its address; the "
+            "per-IP login limit is skipped for it. If %s is a proxy in front of the "
+            "API, add it to FORWARDED_ALLOW_IPS (docs/runbooks/users-and-login.md).",
+            client_host,
+            ",".join(trusted_proxy_entries(os.environ.get("FORWARDED_ALLOW_IPS"))),
+            client_host,
+        )
+    return True
+
+
+def _per_ip_limit_applies(request: Request | None, client_host: str) -> bool:
+    """Whether a failed login also counts against the host across usernames.
+
+    With no proxy named in FORWARDED_ALLOW_IPS, a non-loopback peer is the
+    reverse proxy itself: every client arrives from its one address, so a
+    per-IP count would be one global count and a stranger's spray would lock
+    out everyone, the operator included. The count applies once a proxy is
+    named (uvicorn then hands the route the real client) or when the peer is
+    loopback, except for a request from a hop that is not named
+    (``_from_unnamed_proxy``), whose address is shared in the same way. The
+    per-(username, IP) limit and the signup limit apply either way.
+    """
+    if _from_unnamed_proxy(request, client_host):
+        return False
+    return trusted_proxy_configured() or client_host in ("127.0.0.1", "::1", "localhost")
+
+
 @app.post("/auth/signup", response_class=JSONResponse, operation_id="signup", openapi_extra=mcp_policy("never"))
-def api_signup(body: SignupBody, conn=Depends(conn_dependency)):
-    """Register a new user. Requires SECRET_AUTH_KEY to match env."""
+def api_signup(body: SignupBody, request: Request = None, conn=Depends(conn_dependency)):
+    """Register a new user. Requires SECRET_AUTH_KEY to match env.
+
+    Rate limited per client host (5 attempts / hour by default), and every
+    attempt counts, so SECRET_AUTH_KEY cannot be guessed online at speed.
+    Behind a proxy that FORWARDED_ALLOW_IPS does not name, every client shares
+    the proxy's address and so one count.
+    """
+    ip = _client_host(request)
+    if signup_is_rate_limited(ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many signup attempts. Try again later.",
+        )
+    record_signup_attempt(ip)
     if not verify_secret_auth_key(body.secret_auth_key):
         raise HTTPException(status_code=403, detail="Invalid signup key")
     try:
@@ -1394,16 +1534,14 @@ def api_login(body: LoginBody, request: Request = None, conn=Depends(conn_depend
     default): the route accepted unlimited guesses, so a password was only as
     strong as the time an attacker cared to spend. A correct password clears
     the bucket, so a legitimate operator who mistypes is never locked out for
-    longer than it takes to type it right.
+    longer than it takes to type it right. Failures also count per client
+    host across usernames (30 by default) where ``_per_ip_limit_applies``;
+    a correct password does not clear that count.
     """
     username = (body.username or "").strip().lower()
-    client_host = "unknown"
-    try:
-        if request is not None and request.client is not None:
-            client_host = str(request.client.host or "unknown")
-    except Exception:
-        client_host = "unknown"
-    if login_is_rate_limited(username, client_host):
+    client_host = _client_host(request)
+    per_ip = _per_ip_limit_applies(request, client_host)
+    if login_is_rate_limited(username, client_host, per_ip=per_ip):
         raise HTTPException(
             status_code=429,
             detail="Too many login attempts. Try again in a few minutes.",
@@ -1423,7 +1561,7 @@ def api_login(body: LoginBody, request: Request = None, conn=Depends(conn_depend
                     "message": "No accounts exist yet. Create the first account.",
                 },
             )
-        record_failed_login(username, client_host)
+        record_failed_login(username, client_host, per_ip=per_ip)
         raise HTTPException(status_code=401, detail="Invalid username or password")
     clear_login_attempts(username, client_host)
     user_public = user_doc_to_public(user)
@@ -1873,9 +2011,10 @@ def api_mcp_tools_list(
     request: Request,
     conn=Depends(conn_dependency),
 ):
-    """List the tool catalog for an MCP-driven CC session. Auth'd by the
-    per-session token the IntelliStock backend wrote into the spawned
-    CC's ``--mcp-config`` env."""
+    """List the tool catalog for an MCP-driven CC session. Loopback-only, and
+    auth'd by the per-session token the IntelliStock backend wrote into the
+    spawned CC's ``--mcp-config`` env."""
+    _require_loopback(request)
     _resolve_mcp_session(request, body.conversation_id)
     from chatbot.tools import openai_tool_definitions
     return {"tools": openai_tool_definitions()}
@@ -1895,8 +2034,10 @@ def api_mcp_tool_call(
     ``pending_confirmation`` message to the conversation and return a
     ``pending`` envelope to CC so the model can acknowledge the queued
     action; the user then approves or declines via
-    ``/chatbot/conversations/{id}/mcp-confirm``.
+    ``/chatbot/conversations/{id}/mcp-confirm``. Loopback-only, like the
+    tools list: the MCP server calling it runs in this container.
     """
+    _require_loopback(request)
     sess = _resolve_mcp_session(request, body.conversation_id)
     from chatbot.mcp_bridge import dispatch_mcp_tool_call
     return dispatch_mcp_tool_call(
@@ -1941,6 +2082,39 @@ def api_status(conn=Depends(conn_dependency), current_user: dict = Depends(get_c
     return _run(action_status, conn)
 
 
+_HIDDEN_LLM_TEST_ERROR = (
+    "LLM connectivity test failed. Details are hidden because the base URL is not on the "
+    "allowlist; the API log has them."
+)
+_HIDDEN_SMOKE_ERROR = "Smoke generation failed. Details are hidden because the base URL is not on the allowlist."
+
+
+def _llm_test_key(conn, body: LlmConfigTestBody, provider: str) -> tuple[str, str, dict | None]:
+    """The key /llm/test uses, where it came from, and the saved row it read.
+
+    Returns ``(key, source, saved_row)``; source is "caller", "saved" or "env",
+    as llm_url_policy.guard_key_for_base_url reads it. When editing a saved
+    model, the key field is blank or shows the masked value ("ABSK****xxxx"):
+    with a model_id the stored key is reused, so the user can test without
+    re-entering it. A submitted key wins only when it's a real new value; a
+    masked one without a model_id is sent as typed (it is not a secret). An
+    empty key falls back to the provider's environment variable.
+    """
+    submitted = str(body.api_key or "").strip()
+    if submitted and (not _looks_masked(submitted) or not body.model_id):
+        return submitted, "caller", None
+    row = None
+    if body.model_id:
+        try:
+            row = action_get_model_raw(conn, str(body.model_id))
+        except Exception:
+            row = None
+        saved = str((row or {}).get("api_key") or "").strip()
+        if saved:
+            return saved, "saved", row
+    return resolve_api_key_for_provider(provider, ""), "env", row
+
+
 @app.post("/llm/test", response_class=JSONResponse, operation_id="test_llm_config", openapi_extra=mcp_policy("never"))
 def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     provider = str(body.provider or "").strip().lower()
@@ -1950,19 +2124,27 @@ def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), 
     if not model:
         raise HTTPException(status_code=400, detail="LLM model or deployment name is required")
 
-    # When editing a saved model, the key field is blank or shows the masked
-    # value ("ABSK****xxxx") — reuse the stored key so the user can test without
-    # re-entering it. The submitted key wins only when it's a real new value.
-    submitted_key = str(body.api_key or "").strip()
-    effective_key = submitted_key
-    if (not submitted_key or _looks_masked(submitted_key)) and body.model_id:
+    # A caller-supplied base URL must parse, and a saved or server key never
+    # goes to a host llm_url_policy does not allow. Both checks run before any
+    # LLM call.
+    _url_field = ROW_BASE_URL_FIELD.get(provider)
+    caller_url = str(getattr(body, _url_field) or "").strip() if _url_field else ""
+    caller_host = ""
+    if caller_url:
         try:
-            _saved = action_get_model_raw(conn, str(body.model_id))
-            effective_key = str((_saved or {}).get("api_key") or "").strip()
-        except Exception:
-            effective_key = ""
+            caller_host = parse_base_url(caller_url)[1]
+        except BaseUrlInvalid as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    key, key_source, saved_row = _llm_test_key(conn, body, provider)
+    try:
+        api_key = guard_key_for_base_url(
+            provider, key=key, source=key_source, caller_base_url=caller_url, saved_row=saved_row)
+    except BaseUrlNotAllowed as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # Error text from a host the policy does not allow could map a private
+    # network, so it reaches the response only for allowed hosts.
+    verbose = not caller_url or is_allowed_base_url(provider, caller_url, saved_row=saved_row)
 
-    api_key = resolve_api_key_for_provider(provider, effective_key)
     # Local Ollama legitimately has no api_key — only Ollama Cloud needs
     # a Bearer token. Every other provider still requires a key here.
     if not api_key and provider != "ollama":
@@ -1972,6 +2154,10 @@ def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), 
         )
 
     provider_config = _build_llm_test_provider_config(body)
+    if provider == "ollama":
+        # api_key is already resolved (and may have been withheld above), so the
+        # ollama SDK must not attach OLLAMA_API_KEY on its own.
+        provider_config["ollama_allow_ambient_key"] = False
     # Size the test's output budget to the EFFECTIVE reasoning effort. Reasoning
     # lives in a provider-specific field (bedrock_reasoning / ollama_think), not
     # always reasoning_effort — and reasoning models (e.g. gpt-oss) spend output
@@ -2024,6 +2210,11 @@ def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), 
     meta = get_last_structured_llm_call_metadata()
     if result is None:
         detail = str(meta.get("error") or "").strip() or "LLM connectivity test failed."
+        if not verbose:
+            import logging
+            logging.getLogger("uvicorn.error").warning(
+                "LLM test for %s at unlisted host %r failed: %r", provider, caller_host, detail)
+            detail = _HIDDEN_LLM_TEST_ERROR
         raise HTTPException(status_code=400, detail=detail)
     try:
         _result_payload = result.dict() if hasattr(result, "dict") else dict(result)
@@ -2078,6 +2269,12 @@ def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), 
             _smoke_error = (get_last_plain_llm_call_error() or "")[:512]
         except Exception:
             pass
+    if _smoke_error and not verbose:
+        import logging
+        logging.getLogger("uvicorn.error").warning(
+            "LLM test smoke generation for %s at unlisted host %r failed: %r",
+            provider, caller_host, _smoke_error)
+        _smoke_error = _HIDDEN_SMOKE_ERROR
 
     # For Ollama, surface the content/thinking split from the smoke call
     # so reasoning text doesn't get mixed into the visible response. Other
@@ -3040,38 +3237,44 @@ async def api_ollama_list_models(
 ):
     """Discovery endpoint: list models installed on an Ollama host.
 
-    Body: ``{"base_url": str, "api_key": str | null}``. The api_key is
-    only consulted when the host is Ollama Cloud (``ollama.com``); local
-    hosts ignore it.
+    Body: ``{"base_url": str, "api_key": str | null}``. A key in the body
+    goes to ``base_url`` whatever it is. Without one, the server's
+    ``OLLAMA_API_KEY`` goes only to a host llm_url_policy allows for
+    ollama; any other host is called with no key.
 
     Returns: ``{"models": [{"name", "model", "size_bytes",
     "parameter_size", "quantization_level", "context_length"}, …]}``.
 
-    Errors:
-      * 401 if Ollama Cloud rejects the key.
+    Errors carry fixed text; the API log has the upstream detail:
+      * 400 if llm_url_policy.parse_base_url refuses ``base_url`` (not
+        http(s), no host, credentials, or a link-local address).
+      * 401 if the host rejects the key.
       * 502 if the host is unreachable or returns an upstream error.
     """
     try:
-        models = await ollama_client.list_models(body.base_url, body.api_key)
+        host = parse_base_url(body.base_url)[1]
+    except BaseUrlInvalid as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if body.api_key:
+        api_key = body.api_key
+    elif is_allowed_base_url("ollama", body.base_url):
+        api_key = os.environ.get("OLLAMA_API_KEY")
+    else:
+        api_key = None
+    try:
+        models = await ollama_client.list_models(body.base_url, api_key)
         return {"models": models}
-    except ollama_client.OllamaAuthError:
-        return JSONResponse(
-            status_code=401,
-            content={"error": "Authentication failed"},
-        )
+    except ollama_client.OllamaAuthError as e:
+        failure, status, error = e, 401, "Authentication failed"
     except ollama_client.OllamaConnectionError as e:
-        return JSONResponse(
-            status_code=502,
-            content={
-                "error": f"Could not reach Ollama at {body.base_url}",
-                "detail": str(e),
-            },
-        )
+        failure, status, error = e, 502, "Could not reach the Ollama host"
     except ollama_client.OllamaProviderError as e:
-        return JSONResponse(
-            status_code=502,
-            content={"error": str(e)},
-        )
+        failure, status, error = e, 502, "The Ollama host returned an error"
+    import logging
+    logging.getLogger("uvicorn.error").warning(
+        "Ollama list-models for host %r failed: %r (cause: %r)",
+        host, str(failure), failure.__cause__)
+    return JSONResponse(status_code=status, content={"error": error})
 
 
 class BedrockListModelsBody(BaseModel):
@@ -3100,7 +3303,7 @@ def api_bedrock_list_models(
     Returns: ``{"models": [{"id", "name", "provider_name", "kind",
     "supports_tools", "modalities"}, …]}``.
 
-    Errors:
+    Errors carry fixed text; the API log has the upstream detail:
       * 401 if the key is rejected OR lacks ``bedrock:ListFoundationModels``
         (Bedrock API keys can be narrowly scoped). The UI treats this as
         "discovery unavailable" and falls back to manual model-id entry.
@@ -3110,20 +3313,16 @@ def api_bedrock_list_models(
         models = bedrock_client.list_models(body.api_key, body.region)
         return {"models": models}
     except bedrock_client.BedrockAuthError as e:
-        return JSONResponse(
-            status_code=401,
-            content={"error": "Authentication failed", "detail": str(e)},
-        )
+        failure, status = e, 401
+        error = "Authentication failed (the key may lack bedrock:ListFoundationModels)"
     except bedrock_client.BedrockConnectionError as e:
-        return JSONResponse(
-            status_code=502,
-            content={"error": f"Could not reach Bedrock in {body.region}", "detail": str(e)},
-        )
+        failure, status, error = e, 502, f"Could not reach Bedrock in {body.region}"
     except bedrock_client.BedrockProviderError as e:
-        return JSONResponse(
-            status_code=502,
-            content={"error": str(e)},
-        )
+        failure, status, error = e, 502, "Bedrock returned an error"
+    import logging
+    logging.getLogger("uvicorn.error").warning(
+        "Bedrock list-models in region %r failed: %r", body.region, str(failure))
+    return JSONResponse(status_code=status, content={"error": error})
 
 
 class OpenRouterListModelsBody(BaseModel):
@@ -3149,8 +3348,15 @@ def api_openrouter_list_models(
     Returns: ``{"models": [{"id", "name", "context_length", "pricing"}, …],
     "error": str | null}``. ``pricing`` is the raw OpenRouter object (USD per
     token, string values) so the UI can auto-fill the per-row cost overrides.
-    On any failure ``models`` is ``[]`` and the UI falls back to manual entry.
+    On any failure ``models`` is ``[]`` and the UI falls back to manual entry,
+    except that a non-blank ``base_url`` llm_url_policy.parse_base_url refuses
+    is a 400.
     """
+    if (body.base_url or "").strip():
+        try:
+            parse_base_url(body.base_url)
+        except BaseUrlInvalid as e:
+            raise HTTPException(status_code=400, detail=str(e))
     base_url = str((body.base_url or openrouter_client.DEFAULT_BASE_URL)).strip()
     models = openrouter_client.list_models(base_url)
     return {"models": models, "error": None if models else "No models returned (discovery unavailable)"}
@@ -8012,5 +8218,6 @@ API_URL = os.environ.get("API_URL", "").strip() or ("http://%s:%d" % (API_HOST i
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host=API_HOST, port=API_PORT)
+    from api.server_config import build_uvicorn_config, run_server
+
+    run_server(build_uvicorn_config(app, host=API_HOST, port=API_PORT, proxy_headers=True))
