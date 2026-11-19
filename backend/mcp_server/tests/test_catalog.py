@@ -13,7 +13,7 @@ from mcp_server.catalog import (
     MAX_REF_DEPTH,
     PAGING_PARAM_RE,
     build_catalog,
-    canonical_paths_hash,
+    canonical_schema_hash,
     resolve_refs,
 )
 
@@ -391,19 +391,39 @@ def test_paging_params_detected(catalog):
 
 
 def test_canonical_hash_matches_contract_formula(sample):
-    paths = sample["paths"]
-    expected = hashlib.sha256(json.dumps(paths, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    paths, components = sample["paths"], sample["components"]
+    canonical = {"paths": paths, "components": components}
+    expected = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
                               .encode("utf-8")).hexdigest()
     assert "—" in json.dumps(paths, ensure_ascii=False)  # the fixture carries non-ASCII text...
-    ascii_escaped = hashlib.sha256(json.dumps(paths, sort_keys=True, separators=(",", ":"))
+    ascii_escaped = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":"))
                                    .encode("utf-8")).hexdigest()
     assert ascii_escaped != expected  # ...so the hash proves ensure_ascii=False
-    assert canonical_paths_hash(paths) == expected
+    assert canonical_schema_hash(paths, components) == expected
     assert build_catalog(sample).schema_hash == expected
-    assert schema_hash(paths) == expected  # the fake API publishes the same value
+    assert schema_hash(paths, components) == expected  # the fake API publishes the same value
 
     reordered = {key: paths[key] for key in reversed(list(paths))}
-    assert canonical_paths_hash(reordered) == expected  # key order does not matter
+    assert canonical_schema_hash(reordered, components) == expected  # key order does not matter
+
+
+def test_components_only_change_changes_hash(sample):
+    # Input schemas are inlined from #/components, so a changed body model changes no path.
+    changed = copy.deepcopy(sample)
+    changed["components"]["schemas"]["LiveCommandBody"]["properties"]["type"]["enum"].append("liquidate_all")
+    assert changed["paths"] == sample["paths"]
+
+    before, after = build_catalog(sample), build_catalog(changed)
+    assert after.schema_hash != before.schema_hash
+    assert after.schema_hash == canonical_schema_hash(changed["paths"], changed["components"])
+    body = after.operations["live_command"].input_schema["properties"]["body"]
+    assert "liquidate_all" in body["properties"]["type"]["enum"]
+
+    # The formula's `components or {}`: no components hashes as empty components.
+    paths = sample["paths"]
+    assert canonical_schema_hash(paths, None) == canonical_schema_hash(paths, {})
+    assert canonical_schema_hash(paths, {}) != canonical_schema_hash(paths, sample["components"])
+    assert build_catalog({"paths": {}}).schema_hash == canonical_schema_hash({}, None) == schema_hash({})
 
 
 def test_invalid_document_raises():

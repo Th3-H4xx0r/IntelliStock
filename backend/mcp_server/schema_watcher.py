@@ -7,8 +7,9 @@ seconds and refetches /internal/mcp/openapi.json when the mcp_schema_hash
 there differs from the loaded catalog's. Neither endpoint needs an acting user.
 
 A fetched document is accepted only when its published x-mcp-schema-hash
-equals canonical_paths_hash(doc["paths"]). A missing or different hash, an
-invalid document or an unreachable API leaves the previous catalog in place.
+equals canonical_schema_hash(doc["paths"], doc.get("components")). A missing
+or different hash, an invalid document or an unreachable API leaves the
+previous catalog in place.
 """
 import logging
 from typing import Awaitable, Callable, Optional
@@ -16,7 +17,7 @@ from typing import Awaitable, Callable, Optional
 import anyio
 
 from mcp_server.api_client import ApiClient, ApiUnavailable
-from mcp_server.catalog import Catalog, build_catalog, canonical_paths_hash
+from mcp_server.catalog import Catalog, build_catalog, canonical_schema_hash
 
 INITIAL_BACKOFF_S = 1.0
 MAX_BACKOFF_S = 60.0
@@ -48,11 +49,11 @@ class SchemaWatcher:
         if not isinstance(paths, dict):
             logger.error("Rejected the API schema: 'paths' is missing or not an object; keeping the current catalog.")
             return False
-        computed = canonical_paths_hash(paths)
+        computed = canonical_schema_hash(paths, doc.get("components"))
         published = doc.get("x-mcp-schema-hash")
         if published != computed:
             logger.error("Rejected the API schema: its x-mcp-schema-hash %.80r does not match %s, the hash of its "
-                         "paths; keeping the current catalog.", published, computed)
+                         "paths and components; keeping the current catalog.", published, computed)
             return False
         try:
             catalog = build_catalog(doc)

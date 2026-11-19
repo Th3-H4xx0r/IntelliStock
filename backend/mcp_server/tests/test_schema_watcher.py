@@ -1,5 +1,6 @@
 """The schema watcher: initial load with backoff, /health polling, and rejection of bad documents."""
 import copy
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -21,8 +22,21 @@ def _sample():
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
+def _hash(doc):
+    """The x-mcp-schema-hash the API publishes for doc: its paths and components."""
+    return schema_hash(doc["paths"], doc.get("components"))
+
+
+def _with_changed_component(doc):
+    """doc with one more enum value in a request-body model: the components change, the paths do not."""
+    changed = copy.deepcopy(doc)
+    changed["components"]["schemas"]["LiveCommandBody"]["properties"]["type"]["enum"].append("liquidate_all")
+    assert changed["paths"] == doc["paths"]
+    return changed
+
+
 def _with_extra_operation(doc):
-    """doc plus one more read operation, so its paths hash differently."""
+    """doc plus one more read operation, so it hashes differently."""
     changed = copy.deepcopy(doc)
     changed["paths"]["/positions"] = {"get": {
         "summary": "List positions", "operationId": "list_positions",
@@ -70,7 +84,7 @@ async def test_watcher_refreshes_on_hash_change(fake, watcher, loaded):
     assert await watcher.refresh() is True
     first = watcher.current
     assert loaded == [first]
-    assert first.schema_hash == schema_hash(_sample()["paths"])
+    assert first.schema_hash == _hash(_sample())
     assert "get_instance" in first.operations
 
     await watcher.tick()  # /health reports the loaded hash: nothing to fetch
@@ -81,7 +95,7 @@ async def test_watcher_refreshes_on_hash_change(fake, watcher, loaded):
     fake.set_openapi(changed)
     await watcher.tick()
     assert len(loaded) == 2 and watcher.current is loaded[1]
-    assert watcher.current.schema_hash == schema_hash(changed["paths"]) != first.schema_hash
+    assert watcher.current.schema_hash == _hash(changed) != first.schema_hash
     assert "list_positions" in watcher.current.operations
     assert len(_openapi_fetches(fake)) == 2
 
@@ -116,7 +130,7 @@ async def test_watcher_keeps_old_catalog_on_invalid_document(fake, watcher, load
     first = watcher.current
 
     not_paths = {"openapi": "3.1.0", "paths": ["/x"], "x-mcp-schema-hash": schema_hash(["/x"])}
-    bad_components = {"openapi": "3.1.0", "paths": {}, "components": [], "x-mcp-schema-hash": schema_hash({})}
+    bad_components = {"openapi": "3.1.0", "paths": {}, "components": [], "x-mcp-schema-hash": schema_hash({}, [])}
     for doc in (not_paths, bad_components):
         fake.set_route("GET", OPENAPI_PATH, 200, doc)
         assert await watcher.refresh() is False
@@ -129,7 +143,7 @@ async def test_watcher_rejects_doc_with_wrong_hash(fake, watcher, loaded, caplog
     first = watcher.current
 
     altered = _with_extra_operation(_sample())
-    altered["x-mcp-schema-hash"] = schema_hash(_sample()["paths"])  # the old hash on new paths
+    altered["x-mcp-schema-hash"] = _hash(_sample())  # the old hash on new paths
     fake.set_openapi(altered)
     assert await watcher.refresh() is False
     assert watcher.current is first and loaded == [first]
@@ -140,9 +154,38 @@ async def test_watcher_rejects_doc_with_wrong_hash(fake, watcher, loaded, caplog
     assert await watcher.refresh() is False
     assert watcher.current is first and loaded == [first]
 
-    fake.set_route("GET", OPENAPI_PATH, 200, {**unpublished, "x-mcp-schema-hash": schema_hash(unpublished["paths"])})
+    fake.set_route("GET", OPENAPI_PATH, 200, {**unpublished, "x-mcp-schema-hash": _hash(unpublished)})
     assert await watcher.refresh() is True
     assert "list_positions" in watcher.current.operations
+
+
+async def test_watcher_refetches_on_components_only_change(fake, watcher, loaded):
+    assert await watcher.refresh() is True
+    first = watcher.current
+
+    changed = _with_changed_component(_sample())
+    fake.set_openapi(changed)  # /health now reports the new hash
+    await watcher.tick()
+    assert len(loaded) == 2 and watcher.current is loaded[1]
+    assert watcher.current.schema_hash == _hash(changed) != first.schema_hash
+    body = watcher.current.operations["live_command"].input_schema["properties"]["body"]
+    assert "liquidate_all" in body["properties"]["type"]["enum"]
+
+
+async def test_watcher_rejects_components_change_under_old_hash(fake, watcher, loaded, caplog):
+    assert await watcher.refresh() is True
+    first = watcher.current
+
+    tampered = {**_with_changed_component(_sample()), "x-mcp-schema-hash": _hash(_sample())}
+    paths = _sample()["paths"]
+    paths_only = hashlib.sha256(json.dumps(paths, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                                .encode("utf-8")).hexdigest()
+    old_formula = {**_sample(), "x-mcp-schema-hash": paths_only}  # the hash of the paths alone
+    for doc in (tampered, old_formula):
+        fake.set_route("GET", OPENAPI_PATH, 200, doc)
+        assert await watcher.refresh() is False
+    assert watcher.current is first and loaded == [first]
+    assert len([message for message in _errors(caplog) if "x-mcp-schema-hash" in message]) == 2
 
 
 async def test_watcher_skips_tick_when_health_unavailable(fake, watcher, loaded):
@@ -153,14 +196,14 @@ async def test_watcher_skips_tick_when_health_unavailable(fake, watcher, loaded)
     assert _openapi_fetches(fake) == []
     assert watcher.current is None and loaded == []
 
-    fake.set_route("GET", HEALTH_PATH, 200, {"status": "ok", "mcp_schema_hash": schema_hash(_sample()["paths"])})
+    fake.set_route("GET", HEALTH_PATH, 200, {"status": "ok", "mcp_schema_hash": _hash(_sample())})
     await watcher.tick()
     assert len(loaded) == 1
 
 
 async def test_watcher_initial_backoff_until_api_up(fake, api, loaded):
     state = {"up": False}
-    served = {**_sample(), "x-mcp-schema-hash": schema_hash(_sample()["paths"])}
+    served = {**_sample(), "x-mcp-schema-hash": _hash(_sample())}
 
     def openapi(request):
         if not state["up"]:

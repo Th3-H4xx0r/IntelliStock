@@ -20,8 +20,10 @@ $refs into #/components are inlined, so each input schema stands alone. A
 reference back into a schema that is already being expanded becomes a
 plain-object placeholder, and expansion stops MAX_REF_DEPTH references deep.
 
-schema_hash is canonical_paths_hash(doc["paths"]), the contract's
-x-mcp-schema-hash formula; the schema watcher compares the published value with it.
+schema_hash is canonical_schema_hash(doc["paths"], doc.get("components")), the
+contract's x-mcp-schema-hash formula; the schema watcher compares the published
+value with it. It covers components because the input schemas are inlined from
+there: a changed request-body model changes no path.
 """
 import hashlib
 import json
@@ -112,9 +114,11 @@ class _Skip(Exception):
     """This operation is left out of the catalog; the message is the reason."""
 
 
-def canonical_paths_hash(paths: dict) -> str:
-    """The contract's x-mcp-schema-hash: sha256 hex of the canonical JSON of the "paths" object."""
-    canonical = json.dumps(paths, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+def canonical_schema_hash(paths: Any, components: Any) -> str:
+    """The contract's x-mcp-schema-hash: sha256 hex of the canonical JSON of
+    {"paths": paths, "components": components or {}}."""
+    canonical = json.dumps({"paths": paths, "components": components or {}}, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -335,4 +339,5 @@ def build_catalog(doc: dict) -> Catalog:
             skipped.append(f"{method.upper()} {path}: {exc}")
             continue
         operations[op.operation_id] = op
-    return Catalog(operations=operations, schema_hash=canonical_paths_hash(paths), skipped=tuple(skipped))
+    return Catalog(operations=operations, schema_hash=canonical_schema_hash(paths, components),
+                   skipped=tuple(skipped))

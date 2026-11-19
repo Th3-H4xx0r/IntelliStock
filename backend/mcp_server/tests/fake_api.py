@@ -29,9 +29,10 @@ HEALTH_PATH = "/health"
 Handler = Callable[[httpx.Request], httpx.Response]
 
 
-def schema_hash(paths: Any) -> str:
-    """The contract's x-mcp-schema-hash of an OpenAPI "paths" object."""
-    canonical = json.dumps(paths, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+def schema_hash(paths: Any, components: Any = None) -> str:
+    """The contract's x-mcp-schema-hash of an OpenAPI document's "paths" and "components" objects."""
+    canonical = json.dumps({"paths": paths, "components": components or {}}, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -74,7 +75,7 @@ class FakeApi:
     def set_openapi(self, doc: dict) -> None:
         """Serve doc, adding x-mcp-schema-hash unless doc already carries one (to plant a mismatch)."""
         served = copy.deepcopy(doc)
-        served.setdefault("x-mcp-schema-hash", schema_hash(served.get("paths", {})))
+        served.setdefault("x-mcp-schema-hash", schema_hash(served.get("paths", {}), served.get("components")))
         self._openapi = served
 
     def set_route(self, method: str, path: str, status: int,
