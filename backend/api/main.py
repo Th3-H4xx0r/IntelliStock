@@ -2387,13 +2387,17 @@ def api_history(ticker: Optional[str] = None, limit: int = 30, conn=Depends(conn
 # --- Instances ---
 
 
-@app.get("/instances", response_class=JSONResponse)
+@app.get("/instances", response_class=JSONResponse,
+         operation_id="list_instances", openapi_extra=mcp_policy("read", tool="list_instances"))
 def api_instances(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return every instance: run flag, symbols, strategy and brokerage ids, kind and crash state."""
     return _run(action_instances, conn)
 
 
-@app.post("/instances", response_class=JSONResponse)
+@app.post("/instances", response_class=JSONResponse,
+          operation_id="create_instance", openapi_extra=mcp_policy("money", target={"brokerage": "brokerage_id"}))
 def api_create_instance(body: CreateInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Create an instance. run_command=true sets it running on the linked brokerage, which may be LIVE."""
     return _run(
         action_create_instance,
         conn,
@@ -2413,13 +2417,17 @@ def api_create_instance(body: CreateInstanceBody, conn=Depends(conn_dependency),
     )
 
 
-@app.get("/instances/{instance_id}", response_class=JSONResponse)
+@app.get("/instances/{instance_id}", response_class=JSONResponse,
+         operation_id="get_instance", openapi_extra=mcp_policy("read", tool="get_instance"))
 def api_get_instance(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return one instance with its strategy, masked brokerages, backtests and uptime."""
     return _run(action_get_instance, conn, instance_id)
 
 
-@app.patch("/instances/{instance_id}", response_class=JSONResponse)
+@app.patch("/instances/{instance_id}", response_class=JSONResponse,
+           operation_id="edit_instance", openapi_extra=mcp_policy("money", target={"instance": "instance_id"}))
 def api_edit_instance(instance_id: str, body: EditInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Edit an instance's brokerage, max_usage, symbols, baseline or name. Can change LIVE trading."""
     return _run(
         action_edit_instance,
         conn,
@@ -2435,23 +2443,32 @@ def api_edit_instance(instance_id: str, body: EditInstanceBody, conn=Depends(con
     )
 
 
-@app.delete("/instances/{instance_id}", response_class=JSONResponse)
+@app.delete("/instances/{instance_id}", response_class=JSONResponse,
+            operation_id="delete_instance", openapi_extra=mcp_policy("irreversible"))
 def api_delete_instance(instance_id: str, force: bool = False, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Delete an instance. Irreversible; refused while it is linked to a strategy unless force=true."""
     return _run(action_delete_instance, conn, instance_id, force=force)
 
 
-@app.post("/instances/{instance_id}/stocks", response_class=JSONResponse)
+@app.post("/instances/{instance_id}/stocks", response_class=JSONResponse,
+          operation_id="add_stock", openapi_extra=mcp_policy("money", target={"instance": "instance_id"}))
 def api_add_stock(instance_id: str, body: AddStockBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Add a symbol to an instance's universe. Can change what a LIVE instance trades."""
     return _run(action_add_stock, conn, instance_id, body.symbol)
 
 
-@app.delete("/instances/{instance_id}/stocks/{symbol}", response_class=JSONResponse)
+@app.delete("/instances/{instance_id}/stocks/{symbol}", response_class=JSONResponse,
+            operation_id="remove_stock", openapi_extra=mcp_policy("irreversible"))
 def api_remove_stock(instance_id: str, symbol: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Remove a symbol from an instance's universe. Can change what a LIVE instance trades."""
     return _run(action_remove_stock, conn, instance_id, symbol)
 
 
-@app.post("/instances/{instance_id}/start", response_class=JSONResponse)
+@app.post("/instances/{instance_id}/start", response_class=JSONResponse,
+          operation_id="start_instance",
+          openapi_extra=mcp_policy("money", tool="start_instance", target={"instance": "instance_id"}))
 def api_start_instance(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Start an instance (sets runCommand). Can start LIVE trading on a funded brokerage."""
     # One running instance per Kalshi brokerage: a single account can't have two
     # bots trading it at once (they'd fight over balance/positions). Block the start
     # if a sibling Kalshi instance on the same brokerage is already running.
@@ -2479,8 +2496,11 @@ def api_start_instance(instance_id: str, conn=Depends(conn_dependency), current_
     return _run(action_start_instance, conn, instance_id)
 
 
-@app.post("/instances/{instance_id}/stop", response_class=JSONResponse)
+@app.post("/instances/{instance_id}/stop", response_class=JSONResponse,
+          operation_id="stop_instance",
+          openapi_extra=mcp_policy("money", tool="stop_instance", target={"instance": "instance_id"}))
 def api_stop_instance(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Stop an instance (clears runCommand). Halts its broker, a LIVE one included."""
     return _run(action_stop_instance, conn, instance_id)
 
 
@@ -2497,7 +2517,8 @@ class ClearInstanceStateBody(BaseModel):
     confirm: Optional[str] = Field(default=None, max_length=256)
 
 
-@app.post("/instances/{instance_id}/clear-state", response_class=JSONResponse)
+@app.post("/instances/{instance_id}/clear-state", response_class=JSONResponse,
+          operation_id="clear_instance_state", openapi_extra=mcp_policy("irreversible"))
 def api_clear_instance_state(
     instance_id: str,
     body: ClearInstanceStateBody,
@@ -2558,7 +2579,8 @@ class ReadinessWaiverBody(BaseModel):
 READINESS_WAIVER_MIN_REASON = 20
 
 
-@app.post("/instances/{instance_id}/readiness-waiver", response_class=JSONResponse)
+@app.post("/instances/{instance_id}/readiness-waiver", response_class=JSONResponse,
+          operation_id="readiness_waiver", openapi_extra=mcp_policy("irreversible"))
 def api_readiness_waiver(
     instance_id: str,
     body: ReadinessWaiverBody,
@@ -2694,8 +2716,8 @@ def api_readiness_waiver(
     }
 
 
-@app.delete("/instances/{instance_id}/readiness-waiver",
-            response_class=JSONResponse)
+@app.delete("/instances/{instance_id}/readiness-waiver", response_class=JSONResponse,
+            operation_id="revoke_readiness_waiver", openapi_extra=mcp_policy("irreversible"))
 def api_revoke_readiness_waiver(
     instance_id: str,
     conn=Depends(conn_dependency),
@@ -2767,25 +2789,32 @@ def api_revoke_readiness_waiver(
 # --- Config flags ---
 
 
-@app.post("/config/terminate-price", response_class=JSONResponse)
+@app.post("/config/terminate-price", response_class=JSONResponse,
+          operation_id="terminate_price", openapi_extra=mcp_policy("irreversible"))
 def api_terminate_price(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Stop the price engine process. Prices stop updating for every instance until it restarts."""
     return _run(action_terminate_price, conn)
 
 
-@app.post("/config/terminate-discover", response_class=JSONResponse)
+@app.post("/config/terminate-discover", response_class=JSONResponse,
+          operation_id="terminate_discover", openapi_extra=mcp_policy("write"))
 def api_terminate_discover(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Stop the discover engine (stock discovery) until it is started again."""
     return _run(action_terminate_discover, conn)
 
 
-@app.post("/config/start-broker", response_class=JSONResponse)
+@app.post("/config/start-broker", response_class=JSONResponse,
+          operation_id="start_broker", openapi_extra=mcp_policy("irreversible"))
 def api_start_broker(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Tell the price engine to spawn a price broker process. The price feed is shared by every instance."""
     return _run(action_start_broker, conn)
 
 
 # --- Strategies ---
 
 
-@app.get("/strategies/available", response_class=JSONResponse)
+@app.get("/strategies/available", response_class=JSONResponse,
+         operation_id="available_strategies", openapi_extra=mcp_policy("read"))
 def api_available_strategies(current_user: dict = Depends(get_current_user)):
     """Return all available strategy types from backend/strategies with schema and description."""
     try:
@@ -2795,27 +2824,35 @@ def api_available_strategies(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/strategies", response_class=JSONResponse)
+@app.get("/strategies", response_class=JSONResponse,
+         operation_id="list_strategies", openapi_extra=mcp_policy("read", tool="list_strategies"))
 def api_strategies(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return every strategy config with its sub-strategies and the instances using it."""
     return _run(action_strategies, conn)
 
 
-@app.get("/strategies/{strategy_id}", response_class=JSONResponse)
+@app.get("/strategies/{strategy_id}", response_class=JSONResponse,
+         operation_id="get_strategy", openapi_extra=mcp_policy("read", tool="get_strategy"))
 def api_get_strategy(strategy_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return one strategy config: id, name and its sub-strategies."""
     return _run(action_get_strategy, conn, strategy_id)
 
 
-@app.post("/strategies", response_class=JSONResponse)
+@app.post("/strategies", response_class=JSONResponse, operation_id="create_strategy", openapi_extra=mcp_policy("write"))
 def api_create_strategy(body: CreateStrategyBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Create a strategy config from a name and its sub-strategies; returns the new integer id."""
     return _run(action_create_strategy, conn, body.name, body.strategies)
 
 
-@app.put("/strategies/{strategy_id}", response_class=JSONResponse)
+@app.put("/strategies/{strategy_id}", response_class=JSONResponse,
+         operation_id="edit_strategy", openapi_extra=mcp_policy("money", target={"strategy": "strategy_id"}))
 def api_edit_strategy(strategy_id: int, body: EditStrategyBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Edit a strategy config. Changes how every linked instance trades, LIVE ones included."""
     return _run(action_edit_strategy, conn, strategy_id, name=body.name, strategies=body.strategies, preserve_history=body.preserve_history)
 
 
-@app.post("/strategies/{strategy_id}/config-change-preview", response_class=JSONResponse)
+@app.post("/strategies/{strategy_id}/config-change-preview", response_class=JSONResponse,
+          operation_id="preview_strategy_config_change", openapi_extra=mcp_policy("read"))
 def api_preview_strategy_config_change(strategy_id: int, body: ConfigChangePreviewBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Read-only dry-run: would saving these strategies trigger a Nexus rebuild?
 
@@ -2825,28 +2862,38 @@ def api_preview_strategy_config_change(strategy_id: int, body: ConfigChangePrevi
     return _run(action_preview_strategy_config_change, conn, strategy_id, body.strategies)
 
 
-@app.delete("/strategies/{strategy_id}", response_class=JSONResponse)
+@app.delete("/strategies/{strategy_id}", response_class=JSONResponse,
+            operation_id="delete_strategy", openapi_extra=mcp_policy("irreversible"))
 def api_delete_strategy(strategy_id: int, force: bool = False, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Delete a strategy config. Irreversible; refused while instances use it unless force=true."""
     return _run(action_delete_strategy, conn, strategy_id, force=force)
 
 
-@app.post("/instances/{instance_id}/link-strategy", response_class=JSONResponse)
+@app.post("/instances/{instance_id}/link-strategy", response_class=JSONResponse,
+          operation_id="link_strategy", openapi_extra=mcp_policy("money", target={"instance": "instance_id"}))
 def api_link_strategy(instance_id: str, body: LinkStrategyBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Link a strategy to an instance. Changes how the instance trades, LIVE included."""
     return _run(action_link_strategy, conn, instance_id, body.strategy_id)
 
 
-@app.post("/instances/{instance_id}/unlink-strategy", response_class=JSONResponse)
+@app.post("/instances/{instance_id}/unlink-strategy", response_class=JSONResponse,
+          operation_id="unlink_strategy", openapi_extra=mcp_policy("money", target={"instance": "instance_id"}))
 def api_unlink_strategy(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Clear an instance's strategy link. Changes how the instance trades, LIVE included."""
     return _run(action_unlink_strategy, conn, instance_id)
 
 
-@app.post("/instances/{instance_id}/link-brokerage", response_class=JSONResponse)
+@app.post("/instances/{instance_id}/link-brokerage", response_class=JSONResponse,
+          operation_id="link_brokerage_to_instance",
+          openapi_extra=mcp_policy("money", target={"instance": "instance_id"}))
 def api_link_brokerage_to_instance(instance_id: str, body: LinkBrokerageToInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Set or clear the brokerage linked to an instance."""
     return _run(action_link_brokerage_to_instance, conn, instance_id, body.brokerage_id or None)
 
 
-@app.post("/instances/{instance_id}/link-data-brokerage", response_class=JSONResponse)
+@app.post("/instances/{instance_id}/link-data-brokerage", response_class=JSONResponse,
+          operation_id="link_data_brokerage_to_instance",
+          openapi_extra=mcp_policy("money", target={"instance": "instance_id"}))
 def api_link_data_brokerage_to_instance(instance_id: str, body: LinkBrokerageToInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Set or clear the market-data Alpaca brokerage for this instance.
 
@@ -2861,17 +2908,19 @@ def api_link_data_brokerage_to_instance(instance_id: str, body: LinkBrokerageToI
 # --- Models ---
 
 
-@app.get("/models", response_class=JSONResponse)
+@app.get("/models", response_class=JSONResponse, operation_id="list_models", openapi_extra=mcp_policy("read"))
 def api_list_models(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return every LLM model record, API keys masked."""
     return _run(action_list_models, conn)
 
 
-@app.get("/models/{model_id}", response_class=JSONResponse)
+@app.get("/models/{model_id}", response_class=JSONResponse, operation_id="get_model", openapi_extra=mcp_policy("read"))
 def api_get_model(model_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return one LLM model record, API key masked."""
     return _run(action_get_model, conn, model_id)
 
 
-@app.post("/models", response_class=JSONResponse)
+@app.post("/models", response_class=JSONResponse, operation_id="create_model", openapi_extra=mcp_policy("irreversible"))
 def api_create_model(body: CreateModelBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Create a Model record.
 
@@ -2914,7 +2963,8 @@ def api_create_model(body: CreateModelBody, conn=Depends(conn_dependency), curre
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.put("/models/{model_id}", response_class=JSONResponse)
+@app.put("/models/{model_id}", response_class=JSONResponse,
+         operation_id="edit_model", openapi_extra=mcp_policy("irreversible"))
 def api_edit_model(model_id: str, body: EditModelBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Edit a Model record. Open to any authenticated user; same safety
     reasoning as create (cli_path + extra_args allowlists).
@@ -3090,7 +3140,8 @@ def api_openrouter_list_models(
     return {"models": models, "error": None if models else "No models returned (discovery unavailable)"}
 
 
-@app.post("/models/{model_id}/test-cli", response_class=JSONResponse)
+@app.post("/models/{model_id}/test-cli", response_class=JSONResponse,
+          operation_id="test_claude_cli", openapi_extra=mcp_policy("never"))
 async def api_test_claude_cli(
     model_id: str,
     conn=Depends(conn_dependency),
@@ -3531,13 +3582,17 @@ async def api_claude_logout(current_user: dict = Depends(get_current_user)):
     return {"ok": True, "message": msg}
 
 
-@app.delete("/models/{model_id}", response_class=JSONResponse)
+@app.delete("/models/{model_id}", response_class=JSONResponse,
+            operation_id="delete_model", openapi_extra=mcp_policy("irreversible"))
 def api_delete_model(model_id: str, force: bool = False, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Delete an LLM model record. Irreversible; refused while a strategy references it."""
     return _run(action_delete_model, conn, model_id, force=force)
 
 
-@app.get("/models/{model_id}/strategies", response_class=JSONResponse)
+@app.get("/models/{model_id}/strategies", response_class=JSONResponse,
+         operation_id="model_strategies", openapi_extra=mcp_policy("read"))
 def api_model_strategies(model_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the strategies (id and name) that reference this model."""
     return _run(action_model_strategies, conn, model_id)
 
 
@@ -3565,7 +3620,8 @@ def api_list_backtests(
     )
 
 
-@app.get("/instances/{instance_id}/backtests", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/backtests", response_class=JSONResponse,
+         operation_id="list_instance_backtests", openapi_extra=mcp_policy("read"))
 def api_list_instance_backtests(
     instance_id: str,
     page: int = 1,
@@ -3575,6 +3631,7 @@ def api_list_instance_backtests(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
+    """Return this instance's backtests, paged and sorted by completed_at, pnl or pnl_percent."""
     return _run(
         action_list_backtests,
         conn,
@@ -3890,7 +3947,8 @@ class LiveCommandBody(BaseModel):
     payload: Optional[dict] = None
 
 
-@app.get("/instances/{instance_id}/live-state", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/live-state", response_class=JSONResponse,
+         operation_id="get_live_state", openapi_extra=mcp_policy("read", tool="get_live_state"))
 def api_get_live_state(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Return the current LiveState row for an instance. 404 if the instance
     has never booted a broker, or has already been shut down (no row)."""
@@ -3924,23 +3982,29 @@ def _alpha_page(table, instance_id, origin, run_id, limit, cursor):
     return {"rows": rows, "next_cursor": next_cursor}
 
 
-@app.get("/instances/{instance_id}/alpha/predictions", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/alpha/predictions", response_class=JSONResponse,
+         operation_id="alpha_predictions", openapi_extra=mcp_policy("read"))
 def api_alpha_predictions(instance_id: str, origin: str = None, run_id: str = None,
                           limit: int = None, cursor: str = None,
                           current_user: dict = Depends(get_current_user)):
+    """Return a page of this instance's benchmark-alpha prediction audit rows (cursor paging)."""
     return _alpha_page("AlphaPredictions", instance_id, origin, run_id, limit, cursor)
 
 
-@app.get("/instances/{instance_id}/alpha/allocations", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/alpha/allocations", response_class=JSONResponse,
+         operation_id="alpha_allocations", openapi_extra=mcp_policy("read"))
 def api_alpha_allocations(instance_id: str, origin: str = None, run_id: str = None,
                           limit: int = None, cursor: str = None,
                           current_user: dict = Depends(get_current_user)):
+    """Return a page of this instance's benchmark-alpha allocation audit rows (cursor paging)."""
     return _alpha_page("AlphaAllocations", instance_id, origin, run_id, limit, cursor)
 
 
-@app.get("/instances/{instance_id}/alpha/performance", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/alpha/performance", response_class=JSONResponse,
+         operation_id="alpha_performance", openapi_extra=mcp_policy("read"))
 def api_alpha_performance(instance_id: str, origin: str = None, run_id: str = None,
                           current_user: dict = Depends(get_current_user)):
+    """Return the alpha audit store's health and this instance's risk and inception state."""
     from benchmark_alpha.pg_store import AlphaUnavailableError
     store = _alpha_store()
     health = store.health()
@@ -3960,9 +4024,11 @@ def api_alpha_performance(instance_id: str, origin: str = None, run_id: str = No
     return payload
 
 
-@app.get("/instances/{instance_id}/alpha/readiness", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/alpha/readiness", response_class=JSONResponse,
+         operation_id="alpha_readiness", openapi_extra=mcp_policy("read"))
 def api_alpha_readiness(instance_id: str,
                         current_user: dict = Depends(get_current_user)):
+    """Return this instance's live-readiness checks, state and the reasons it is not ready."""
     from live_readiness import (LiveReadinessError, ReadinessCheck, ReadinessReport,
                                 ReadinessState, assert_live_start_allowed, report_from_mapping)
     from benchmark_alpha.pg_store import AlphaUnavailableError
@@ -4116,7 +4182,8 @@ def _widget_account(inst, hist, positions):
     }
 
 
-@app.get("/widget/accounts", response_class=JSONResponse)
+@app.get("/widget/accounts", response_class=JSONResponse,
+         operation_id="get_account_summary", openapi_extra=mcp_policy("read", tool="get_account_summary"))
 def api_widget_accounts(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Full widget payload (value + day P&L + intraday curve + positions) for
     each instance, in ONE authenticated call — so the iOS widget can fetch fresh
@@ -4163,7 +4230,8 @@ def api_widget_accounts(conn=Depends(conn_dependency), current_user: dict = Depe
     return {"accounts": out, "synced_at": int(_time.time())}
 
 
-@app.get("/instances/{instance_id}/live-logs", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/live-logs", response_class=JSONResponse,
+         operation_id="get_live_trading_logs", openapi_extra=mcp_policy("read"))
 def api_get_live_trading_logs(instance_id: str, since_line: int = 0, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Live-tail of the broker's log for this instance. since_line cursor
     exactly mirrors /nexus-graph-builds/{id}/logs so the frontend can reuse
@@ -4171,7 +4239,9 @@ def api_get_live_trading_logs(instance_id: str, since_line: int = 0, conn=Depend
     return _run(action_live_trading_logs, conn, instance_id, since_line)
 
 
-@app.post("/instances/{instance_id}/live-command", response_class=JSONResponse)
+@app.post("/instances/{instance_id}/live-command", response_class=JSONResponse,
+          operation_id="live_command",
+          openapi_extra=mcp_policy("money", tool="live_command", target={"instance": "instance_id"}))
 def api_submit_live_command(instance_id: str, body: LiveCommandBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Submit a command to the broker. Any authenticated user can halt,
     close a position, or submit a manual order — the UI typed-confirm modals
@@ -4188,7 +4258,8 @@ def api_submit_live_command(instance_id: str, body: LiveCommandBody, conn=Depend
     )
 
 
-@app.get("/live-commands/{command_id}", response_class=JSONResponse)
+@app.get("/live-commands/{command_id}", response_class=JSONResponse,
+         operation_id="get_live_command", openapi_extra=mcp_policy("read"))
 def api_get_live_command(command_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Return the status and result of a previously-submitted live command.
     UI polls this until `status` ∈ {completed, failed}."""
@@ -4212,15 +4283,17 @@ class SwingDecisionBody(BaseModel):
     expect_regrade_count: Optional[int] = Field(default=None, ge=0)
 
 
-@app.get("/instances/{instance_id}/swing/signals", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/swing/signals", response_class=JSONResponse,
+         operation_id="list_swing_signals", openapi_extra=mcp_policy("read", tool="list_swing_signals"))
 def api_swing_list_signals(instance_id: str, status: Optional[str] = None, limit: int = 100,
                            conn=Depends(conn_dependency),
                            current_user: dict = Depends(get_current_user)):
+    """Return this instance's swing-trader signals, newest first, optionally filtered by status."""
     return _run(action_swing_list_signals, conn, instance_id, status, limit)
 
 
-@app.post("/instances/{instance_id}/swing/signals/{signal_id}/decision",
-          response_class=JSONResponse)
+@app.post("/instances/{instance_id}/swing/signals/{signal_id}/decision", response_class=JSONResponse,
+          operation_id="swing_decide_signal", openapi_extra=mcp_policy("money", target={"instance": "instance_id"}))
 def api_swing_decide_signal(instance_id: str, signal_id: str, body: SwingDecisionBody,
                             conn=Depends(conn_dependency),
                             current_user: dict = Depends(get_current_user)):
@@ -4258,8 +4331,8 @@ def api_swing_decide_signal(instance_id: str, signal_id: str, body: SwingDecisio
     return out
 
 
-@app.post("/instances/{instance_id}/swing/signals/{signal_id}/resend",
-          response_class=JSONResponse)
+@app.post("/instances/{instance_id}/swing/signals/{signal_id}/resend", response_class=JSONResponse,
+          operation_id="swing_resend_signal", openapi_extra=mcp_policy("money", target={"instance": "instance_id"}))
 def api_swing_resend_signal(instance_id: str, signal_id: str,
                             conn=Depends(conn_dependency),
                             current_user: dict = Depends(get_current_user)):
@@ -4290,17 +4363,19 @@ def api_swing_resend_signal(instance_id: str, signal_id: str,
     return out
 
 
-@app.get("/instances/{instance_id}/wheel", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/wheel", response_class=JSONResponse,
+         operation_id="wheel_overview", openapi_extra=mcp_policy("read"))
 def api_wheel_overview(instance_id: str, conn=Depends(conn_dependency),
                        current_user: dict = Depends(get_current_user)):
+    """Return the wheel book: open short puts from the broker, ITM %, collateral, cash, recent scans."""
     try:
         return _run(action_wheel_overview, conn, instance_id)
     except SwingBrokerUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
 
-@app.post("/instances/{instance_id}/swing/signals/{signal_id}/regrade",
-          response_class=JSONResponse)
+@app.post("/instances/{instance_id}/swing/signals/{signal_id}/regrade", response_class=JSONResponse,
+          operation_id="swing_regrade_signal", openapi_extra=mcp_policy("write", cost=True))
 def api_swing_regrade_signal(instance_id: str, signal_id: str,
                              conn=Depends(conn_dependency),
                              current_user: dict = Depends(get_current_user)):
@@ -4324,7 +4399,8 @@ def api_swing_regrade_signal(instance_id: str, signal_id: str,
         raise HTTPException(status_code=503, detail=str(exc))
 
 
-@app.post("/instances/{instance_id}/wheel/scan", response_class=JSONResponse)
+@app.post("/instances/{instance_id}/wheel/scan", response_class=JSONResponse,
+          operation_id="wheel_manual_scan", openapi_extra=mcp_policy("write", cost=True))
 def api_wheel_manual_scan(instance_id: str, conn=Depends(conn_dependency),
                           current_user: dict = Depends(get_current_user)):
     """Run the wheel scan now. Review only: it adds pending cards and never
@@ -4343,16 +4419,19 @@ def api_wheel_manual_scan(instance_id: str, conn=Depends(conn_dependency),
         raise HTTPException(status_code=503, detail=str(exc))
 
 
-@app.get("/instances/{instance_id}/wheel/scan", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/wheel/scan", response_class=JSONResponse,
+         operation_id="wheel_manual_scan_status", openapi_extra=mcp_policy("read"))
 def api_wheel_manual_scan_status(instance_id: str, conn=Depends(conn_dependency),
                                  current_user: dict = Depends(get_current_user)):
     """The newest manual wheel run and whether it is still going."""
     return _run(action_wheel_manual_scan_status, conn, instance_id)
 
 
-@app.get("/instances/{instance_id}/swing/calibration", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/swing/calibration", response_class=JSONResponse,
+         operation_id="swing_calibration", openapi_extra=mcp_policy("read"))
 def api_swing_calibration(instance_id: str, conn=Depends(conn_dependency),
                           current_user: dict = Depends(get_current_user)):
+    """Return the swing and wheel calibration report and whether the closed-trade gate is met."""
     return _run(action_swing_calibration, conn, instance_id)
 
 
@@ -4785,13 +4864,15 @@ def api_remove_discovered(instance_id: str, ticker: str, conn=Depends(conn_depen
 
 # ── Nexus Trend/Discovery Config ───────────────────────────────────────────────
 
-@app.get("/nexus/config/{instance_id}", response_class=JSONResponse)
+@app.get("/nexus/config/{instance_id}", response_class=JSONResponse,
+         operation_id="nexus_config_get", openapi_extra=mcp_policy("read"))
 def api_nexus_config_get(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Get nexus trend tracking and stock discovery configuration for an instance."""
     return _run(action_nexus_config_get, conn, instance_id)
 
 
-@app.patch("/nexus/config/{instance_id}", response_class=JSONResponse)
+@app.patch("/nexus/config/{instance_id}", response_class=JSONResponse,
+           operation_id="nexus_config_set", openapi_extra=mcp_policy("money", target={"instance": "instance_id"}))
 def api_nexus_config_set(instance_id: str, body: NexusConfigUpdateBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Update nexus trend tracking and stock discovery configuration for an instance."""
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
@@ -6921,7 +7002,9 @@ def api_brokerage_nexus_outcomes(brokerage_id: str, conn=Depends(conn_dependency
 # at the strategy tick cadence). Always pulls from Alpaca's authoritative
 # /v2/account/portfolio/history endpoint.
 
-@app.get("/instances/{instance_id}/portfolio-history", response_class=JSONResponse)
+@app.get("/instances/{instance_id}/portfolio-history", response_class=JSONResponse,
+         operation_id="get_instance_portfolio_history",
+         openapi_extra=mcp_policy("read", tool="get_instance_portfolio_history"))
 def api_instance_portfolio_history(
     instance_id: str,
     range: Optional[str] = "1D",

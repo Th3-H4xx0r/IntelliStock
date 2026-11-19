@@ -44,8 +44,9 @@ def _policy(route) -> dict | None:
 ANNOTATED_PREFIXES = ("/health", "/help", "/auth/", "/onboarding/", "/chatbot/", "/status", "/llm/",
     "/llm-usage/", "/benzinga/", "/notification-preferences", "/push/", "/notifications/", "/tickers",
     "/prices", "/history", "/app-updates/", "/ota/", "/codex/", "/claude/", "/admin/", "/ollama/",
-    "/bedrock/", "/openrouter/", "/kalshi/img")
-PENDING = ()          # path prefixes inside an annotated prefix that a later batch owns
+    "/bedrock/", "/openrouter/", "/kalshi/img", "/instances", "/live-commands/", "/config/", "/strategies",
+    "/models", "/widget/", "/nexus/config/")
+PENDING = ("/instances/{instance_id}/kalshi/",)   # path prefixes inside an annotated prefix that a later batch owns
 
 
 def _annotated():
@@ -114,6 +115,28 @@ def test_money_targets_resolve():
     for r in _annotated():
         if _policy(r)["class"] == "money":
             assert _target_resolves(r), r.path
+
+
+SPEC_LIVE_ROUTES = {   # spec §6 "money" list, as routes; each must stay gated
+    ("POST", "/instances/{instance_id}/start"), ("POST", "/instances/{instance_id}/stop"),
+    ("POST", "/instances/{instance_id}/live-command"), ("POST", "/config/start-broker"),
+    ("POST", "/instances/{instance_id}/swing/signals/{signal_id}/decision"),
+    ("POST", "/instances/{instance_id}/swing/signals/{signal_id}/resend"),
+    ("POST", "/instances/{instance_id}/link-brokerage"), ("POST", "/instances/{instance_id}/link-strategy"),
+    ("PATCH", "/instances/{instance_id}"), ("PUT", "/strategies/{strategy_id}"), ("PUT", "/models/{model_id}"),
+}
+
+
+def test_spec_named_live_routes_are_gated():
+    by_key = {(m, r.path): _policy(r) for r in _api_routes() for m in r.methods}
+    for key in SPEC_LIVE_ROUTES:
+        if key[1].startswith(ANNOTATED_PREFIXES):
+            assert by_key[key]["class"] in ("money", "irreversible"), key
+
+
+def test_model_writes_always_need_approval():          # lead ruling
+    for m, path in (("POST", "/models"), ("PUT", "/models/{model_id}"), ("DELETE", "/models/{model_id}")):
+        assert [_policy(r)["class"] for r in _api_routes() if r.path == path and m in r.methods] == ["irreversible"]
 
 
 class _ProbeBody(BaseModel):
