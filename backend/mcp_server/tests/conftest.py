@@ -14,6 +14,7 @@ to do so.
 """
 import atexit
 import base64
+import json
 import os
 import sys
 import tempfile
@@ -33,6 +34,7 @@ sys.path.insert(0, _ISOLATED)
 sys.modules.setdefault("conftest", sys.modules[__name__])
 
 import mcp_server  # noqa: E402,F401  (resolve the package through the isolated path, once)
+from webauthn_fake import SoftAuthenticator  # noqa: E402
 
 
 def _remove_isolated_path():
@@ -91,3 +93,26 @@ def settings(env):
     from mcp_server.config import load_settings
 
     return load_settings(env)
+
+
+def seed_enrolled_user(db, passkeys, totp, *, user_id="u-123", username="operator") -> tuple[SoftAuthenticator, str]:
+    """A user as enrollment leaves one: a users row and one passkey. (the authenticator holding it, the TOTP secret)
+
+    The authenticator plays the RP ID and origin the passkey service checks, so
+    its assertions verify; the secret generates the user's valid TOTP codes.
+    """
+    secret = totp.new_secret()
+    db.query(
+        "INSERT INTO users (user_id, username, enrolled_at, totp_secret_enc, totp_last_step) VALUES (?, ?, ?, ?, 0)",
+        (user_id, username, time.time(), totp.seal(secret, user_id)),
+    )
+    authenticator = SoftAuthenticator(passkeys._rp_id, passkeys._origin)
+    options, challenge = passkeys.registration_options(user_id=user_id, username=username)
+    passkey = passkeys.verify_registration(authenticator.create(options), challenge)
+    db.query(
+        "INSERT INTO passkeys (credential_id, user_id, public_key, sign_count, transports, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (passkey.credential_id, user_id, passkey.public_key, passkey.sign_count, json.dumps(passkey.transports),
+         time.time()),
+    )
+    return authenticator, secret
