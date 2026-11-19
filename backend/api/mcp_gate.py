@@ -17,13 +17,17 @@ header:
   the route all see the same bytes. A non-read call must carry an
   Idempotency-Key (428 without one). A repeat of a known key runs nothing: the
   identical request gets the stored response with X-MCP-Idempotent-Replay, any
-  other request, or one while the first still runs, a 409. Otherwise the call
-  claims the key, its completed response is stored whatever the status (a
-  held approval's 202 included), and a call that raises releases the key
-  (mcp_idempotency). A money call on a live, unknown or
-  protected target, and every irreversible call, is held: a pending approval,
-  a push and a 202, and the route does not run. Anything else runs with the
-  principal in the ASGI scope, where ``main.get_current_user`` picks it up.
+  other request, or one while the first still runs, a 409. Then the caps
+  (mcp_caps) can refuse the call with a 429 and Retry-After before it claims
+  anything: the per-minute call and write windows, the one backtest slot and
+  the daily cost-route cap. Otherwise the call claims the key, its completed
+  response is stored whatever the status (a held approval's 202 included), and
+  a call that raises releases the key (mcp_idempotency). A money call on a
+  live, unknown or protected target, and every irreversible call, is held: a
+  pending approval, a push and a 202, and the route does not run. Past the
+  daily approval-request cap it is a 429 instead, and the key is released, so
+  a retry is checked again. Anything else runs with the principal in the ASGI
+  scope, where ``main.get_current_user`` picks it up.
 
 One more branch comes before the listener test: a scope carrying
 REPLAY_SCOPE_KEY is an approved call that the decision route replays in-process
@@ -60,6 +64,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 import auth_utils
 import mcp_approvals
+import mcp_caps
 import mcp_idempotency
 from mcp_audit import summarize_args, write_audit
 from mcp_policy import (
@@ -512,7 +517,25 @@ class McpGateMiddleware:
                                                operation_id, found, audit_fields)
                 return
 
-        # [Task 15: the rate caps, the daily cost cap and the backtest slot go here.]
+        # The caps, after the lookup (a known key is answered without spending
+        # any) and before the claim (a refused call claims nothing). The slot
+        # goes before the cost cap: a refused backtest spends no daily budget.
+        refusal = await self._store_step(scope, started, principal, operation_id, audit_fields,
+                                         mcp_caps.caps.check_rate, non_read=idempotent, cfg=cfg)
+        if refusal is None and operation_id in mcp_caps.BACKTEST_START_OPERATIONS:
+            refusal = await self._store_step(scope, started, principal, operation_id, audit_fields,
+                                             mcp_caps.caps.check_backtest_slot, cfg)
+        if refusal is None and policy.get("cost"):
+            refusal = await self._store_step(scope, started, principal, operation_id, audit_fields,
+                                             mcp_caps.caps.check_cost, cfg)
+            if refusal is None:
+                # Marks the call as one of the day's cost calls, which is what
+                # re-seeds the count after a restart.
+                audit_fields["cap_bucket"] = "cost"
+        if refusal is not None:
+            await self._capped(scope, receive, send, started, principal, operation_id, refusal,
+                               **audit_fields)
+            return
 
         if idempotent:
             claimed = await self._store_step(scope, started, principal, operation_id, audit_fields,
@@ -535,11 +558,28 @@ class McpGateMiddleware:
         reason = approval_reason(policy, money_state)
         audit_fields["money_state"] = reason or money_state
 
+        if reason is not None:
+            # The daily approval-request cap. The key is claimed by now, so a
+            # refusal releases it: a 429 is never stored as the key's response.
+            try:
+                refusal = await run_in_threadpool(mcp_caps.caps.check_approvals, cfg)
+            except Exception:
+                if idempotent:
+                    await _release_key(idem_client, idempotency_key)
+                await _audit(scope, started, outcome="error", status=500, principal=principal,
+                             operation_id=operation_id, **audit_fields)
+                raise
+            if refusal is not None:
+                if idempotent:
+                    await _release_key(idem_client, idempotency_key)
+                await self._capped(scope, receive, send, started, principal, operation_id, refusal,
+                                   **audit_fields)
+                return
+
         response = _ResponseCapture(send, keep_body=idempotent)
         approval_id: str | None = None
         try:
             if reason is not None:
-                # [Task 15: the daily approvals cap goes here.]
                 row = await _create_held_approval(
                     scope, cfg, principal=principal, operation_id=operation_id,
                     path_params=path_params, query=query, body=body_obj, reason=reason,
@@ -675,6 +715,16 @@ class McpGateMiddleware:
         await _respond(scope, receive, send, 401, UNAUTHENTICATED_DETAIL,
                        headers={"WWW-Authenticate": "Bearer"})
         await _audit(scope, started, outcome="unauthenticated", status=401, client=client)
+
+    async def _capped(self, scope: Scope, receive: Receive, send: Send, started: float,
+                      principal: dict, operation_id: str | None, refusal: mcp_caps.CapRefusal,
+                      **audit_fields: object) -> None:
+        """A cap's 429: {"detail", "retry_after_s"} and the same integer in Retry-After."""
+        await JSONResponse({"detail": refusal.detail, "retry_after_s": refusal.retry_after_s},
+                           status_code=429, headers={"Retry-After": str(refusal.retry_after_s)})(
+            scope, receive, send)
+        await _audit(scope, started, outcome="capped", status=429, principal=principal,
+                     operation_id=operation_id, **audit_fields)
 
     async def _refuse(self, scope: Scope, receive: Receive, send: Send, started: float,
                       principal: dict, operation_id: str | None, *, status: int, detail: str,
