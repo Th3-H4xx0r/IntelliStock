@@ -64,6 +64,8 @@ from auth_utils import (
     create_access_token,
     login_is_rate_limited,
     record_failed_login,
+    record_signup_attempt,
+    signup_is_rate_limited,
     token_version_of,
     decode_access_token,
     renewed_token_if_stale,
@@ -73,6 +75,7 @@ from auth_utils import (
     set_onboarding_completed,
     MIN_PASSWORD_LENGTH,
 )
+from api.server_config import trusted_proxy_configured
 from strategies_meta import get_available_strategies
 from stock_credential_boundary import StockCredentialError
 # Module level so it is monkeypatchable, and because it imports nothing heavier
@@ -1363,9 +1366,51 @@ def api_help():
 # --- Auth endpoints (signup/login public; rest protected) ---
 
 
+def _client_host(request: Request | None) -> str:
+    """The peer address uvicorn hands the route, or "unknown".
+
+    Behind Traefik that is Traefik's own address unless FORWARDED_ALLOW_IPS
+    names it, in which case uvicorn has already swapped in the client from
+    X-Forwarded-For (api.server_config).
+    """
+    try:
+        if request is not None and request.client is not None:
+            return str(request.client.host or "unknown")
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _per_ip_limit_applies(client_host: str) -> bool:
+    """Whether a failed login also counts against the host across usernames.
+
+    With no proxy named in FORWARDED_ALLOW_IPS, a non-loopback peer is the
+    reverse proxy itself: every client arrives from its one address, so a
+    per-IP count would be one global count and a stranger's spray would lock
+    out everyone, the operator included. The count applies once a proxy is
+    named (uvicorn then hands the route the real client) or when the peer is
+    loopback. The per-(username, IP) limit and the signup limit apply either
+    way.
+    """
+    return trusted_proxy_configured() or client_host in ("127.0.0.1", "::1", "localhost")
+
+
 @app.post("/auth/signup", response_class=JSONResponse)
-def api_signup(body: SignupBody, conn=Depends(conn_dependency)):
-    """Register a new user. Requires SECRET_AUTH_KEY to match env."""
+def api_signup(body: SignupBody, request: Request = None, conn=Depends(conn_dependency)):
+    """Register a new user. Requires SECRET_AUTH_KEY to match env.
+
+    Rate limited per client host (5 attempts / hour by default), and every
+    attempt counts, so SECRET_AUTH_KEY cannot be guessed online at speed.
+    Behind a proxy that FORWARDED_ALLOW_IPS does not name, every client shares
+    the proxy's address and so one count.
+    """
+    ip = _client_host(request)
+    if signup_is_rate_limited(ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many signup attempts. Try again later.",
+        )
+    record_signup_attempt(ip)
     if not verify_secret_auth_key(body.secret_auth_key):
         raise HTTPException(status_code=403, detail="Invalid signup key")
     try:
@@ -1390,16 +1435,14 @@ def api_login(body: LoginBody, request: Request = None, conn=Depends(conn_depend
     default): the route accepted unlimited guesses, so a password was only as
     strong as the time an attacker cared to spend. A correct password clears
     the bucket, so a legitimate operator who mistypes is never locked out for
-    longer than it takes to type it right.
+    longer than it takes to type it right. Failures also count per client
+    host across usernames (30 by default) where ``_per_ip_limit_applies``;
+    a correct password does not clear that count.
     """
     username = (body.username or "").strip().lower()
-    client_host = "unknown"
-    try:
-        if request is not None and request.client is not None:
-            client_host = str(request.client.host or "unknown")
-    except Exception:
-        client_host = "unknown"
-    if login_is_rate_limited(username, client_host):
+    client_host = _client_host(request)
+    per_ip = _per_ip_limit_applies(client_host)
+    if login_is_rate_limited(username, client_host, per_ip=per_ip):
         raise HTTPException(
             status_code=429,
             detail="Too many login attempts. Try again in a few minutes.",
@@ -1419,7 +1462,7 @@ def api_login(body: LoginBody, request: Request = None, conn=Depends(conn_depend
                     "message": "No accounts exist yet. Create the first account.",
                 },
             )
-        record_failed_login(username, client_host)
+        record_failed_login(username, client_host, per_ip=per_ip)
         raise HTTPException(status_code=401, detail="Invalid username or password")
     clear_login_attempts(username, client_host)
     user_public = user_doc_to_public(user)
