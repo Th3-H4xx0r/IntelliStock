@@ -29,7 +29,7 @@ from api.mcp_gate import (
     require_mcp_service, service_auth_failure,
 )
 from mcp_helpers import (
-    MCP_TOKEN, PEER_IN, PEER_OUT, human_token, make_probe_app, mcp_client, mcp_env,
+    MCP_TOKEN, PEER_GATEWAY, PEER_IN, PEER_OUT, human_token, make_probe_app, mcp_client, mcp_env,
     public_client, seed_operator, use_store,
 )
 from mcp_policy import McpConfig
@@ -170,6 +170,7 @@ def test_principal_carries_the_client_header():
 @pytest.mark.parametrize("kwargs,env", [
     ({}, {"MCP_ENABLED": "false"}),                       # kill switch
     ({"peer": PEER_OUT}, {}),
+    ({"peer": PEER_GATEWAY}, {}),                         # mcp_net's host gateway, not the mcp container
     ({"token": "wrong" * 8}, {}), ({"token": None}, {}),
     ({"acting_user": "nobody"}, {}), ({"acting_user": None}, {}),
     ({"client": "bad client!"}, {}),

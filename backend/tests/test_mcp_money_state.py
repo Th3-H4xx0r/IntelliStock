@@ -87,6 +87,22 @@ def test_paper_mode_that_pydantic_reads_as_false_escalates(seeded):
     assert resolve_money_state(P_INST, {"instance_id": "kalshi-dry"}, {"paper_mode": None}, CFG) == "paper"
 
 
+@pytest.mark.parametrize("config", [
+    {"paper_mode": False, "live_enabled": False},   # final review I1
+    {"live_enabled": False},                        # no stored paper_mode
+    {"paper_mode": "yes", "live_enabled": False},   # truthy is not True
+])
+def test_kalshi_on_a_live_brokerage_is_paper_only_when_paper_mode_is_true(seeded, config):
+    # PATCH .../kalshi/config re-derives live_enabled = live and not paper on every
+    # call, from the stored paper_mode when the body omits it. A rename sent to a
+    # bot stored paper_mode false + live_enabled false writes live_enabled true:
+    # real orders. So only a stored paper_mode of exactly True reads paper.
+    seeded.insert("Instances", {"id": "kalshi-off", "brokerage_id": "b-kalshi-live",
+                                "kind": "kalshi", "kalshi_config": config})
+    assert resolve_money_state(P_INST, {"instance_id": "kalshi-off"}, {"name": "renamed"}, CFG) == "live"
+    assert resolve_money_state(P_INST, {"instance_id": "kalshi-off"}, None, CFG) == "live"
+
+
 def test_escalating_brokerage_is_touched(seeded):
     # Repointing a paper instance at f14-paper's account touches f14-paper.
     assert resolve_money_state(P_INST, {"instance_id": "paper-1"}, {"brokerage_id": "b-f14"}, CFG) == "protected"
@@ -138,6 +154,9 @@ def test_instance_money_kalshi_ignores_alpaca_flag():
     inst = {"kind": "kalshi", "brokerage_id": "b", "kalshi_config": {"live_enabled": True}}
     assert instance_money(inst, brokerages) == "live"
     assert instance_money({"kind": "kalshi", "brokerage_id": "b-gone"}, {}) == "unknown"
+    off = {"kind": "kalshi", "brokerage_id": "b", "kalshi_config": {"live_enabled": False, "paper_mode": False}}
+    assert instance_money(off, brokerages) == "live"
+    assert instance_money({**off, "kalshi_config": None}, brokerages) == "live"
     assert instance_money({"brokerage_id": "b-gone"}, {}) == "unknown"
     assert instance_money({"brokerage_id": ""}, {}) == "none"
 

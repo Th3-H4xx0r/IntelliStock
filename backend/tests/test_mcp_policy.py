@@ -6,6 +6,7 @@ the x-mcp object, the MCP_* defaults and the one hash formula every MCP check us
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import sys
@@ -61,7 +62,7 @@ def test_validate_policy():
 def test_config_defaults():
     cfg = McpConfig.from_env({})
     assert cfg.enabled is False and cfg.service_token is None and cfg.port == 8012
-    assert str(cfg.allowed_cidr) == "172.31.250.0/24"
+    assert str(cfg.allowed_cidr) == "172.31.250.10/32"
     assert cfg.protected_instances == frozenset({"f14-paper", "swing-paper"})
     assert cfg.protected_accounts == frozenset({"PA37JPXGU196"})
     assert (cfg.approval_ttl_s, cfg.cap_cost_per_day, cfg.cap_approvals_per_day, cfg.cap_calls_per_min,
@@ -84,6 +85,22 @@ def test_short_token_is_unset():
 def test_bad_cidr_disables():
     env = {"MCP_ENABLED": "true", "MCP_SERVICE_TOKEN": "x" * 32, "MCP_ALLOWED_CIDR": "nonsense"}
     assert McpConfig.from_env(env).usable is False
+
+
+def test_default_cidr_admits_only_the_pinned_mcp_container():
+    # Lead ruling: build D pins the mcp container to 172.31.250.10 on mcp_net. The
+    # host gateway (172.31.250.1) and the rest of that subnet are outside.
+    cidr = McpConfig.from_env({}).allowed_cidr
+    assert ipaddress.ip_address("172.31.250.10") in cidr
+    for peer in ("172.31.250.1", "172.31.250.7", "172.31.250.11", "172.31.250.255"):
+        assert ipaddress.ip_address(peer) not in cidr, peer
+
+
+@pytest.mark.parametrize("raw", ["0.0.0.0/0", "::/0", "10.1.2.3/0"])
+def test_a_cidr_that_admits_every_address_disables(raw):
+    # FORWARDED_ALLOW_IPS refuses prefix length 0 too: "everyone" is never a peer rule.
+    cfg = McpConfig.from_env({"MCP_ENABLED": "true", "MCP_SERVICE_TOKEN": "x" * 32, "MCP_ALLOWED_CIDR": raw})
+    assert cfg.allowed_cidr is None and cfg.usable is False
 
 
 def test_bad_ints_fall_back_and_zero_is_allowed():

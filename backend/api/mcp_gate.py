@@ -70,7 +70,8 @@ import auth_utils
 import mcp_approvals
 import mcp_caps
 import mcp_idempotency
-from mcp_audit import summarize_args, write_audit
+from db import schema
+from mcp_audit import AUDIT_TABLE, summarize_args, write_audit
 from mcp_policy import (
     NON_READ_CLASSES, McpConfig, approval_reason, canonical_request_sha256, resolve_money_state,
     validate_policy,
@@ -120,6 +121,22 @@ CLIENT_CLOSED_STATUS = 499
 _BAD_JWT_DETAIL = "Invalid or expired token"
 # api/main.py's API_PORT default; the gate must agree with it on the public port.
 _PUBLIC_PORT_DEFAULT = "8000"
+
+
+# The gate's four tables (contract §6).
+MCP_TABLES = (mcp_approvals.APPROVALS_TABLE, mcp_approvals.DEVICES_TABLE,
+              mcp_idempotency.IDEMPOTENCY_TABLE, AUDIT_TABLE)
+
+
+def ensure_mcp_tables() -> None:
+    """Create the gate's four tables; idempotent DDL, raises on a store error.
+
+    Registering a table in db.schema does not create it, nothing on deploy runs
+    a bare ensure_schema(), and the Postgres store does not create a missing
+    table (the MoveEvents bug, 88cf3549). The API startup hook calls this, so
+    the tables exist before the first MCP call or device enrolment.
+    """
+    schema.ensure_schema(tables=MCP_TABLES)
 
 
 def principal_from_scope(scope: Mapping) -> dict | None:

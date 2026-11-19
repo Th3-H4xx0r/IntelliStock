@@ -77,6 +77,12 @@ def test_mcp_config_has_proxy_headers_off_and_lifespan_off():
     assert c.server_header is False
 
 
+def test_mcp_config_serves_no_websockets():
+    # The gate checks http scopes; with ws "none" no websocket scope reaches :8012,
+    # so every request there is one the gate checked (contract §2).
+    assert build_mcp_uvicorn_config(tiny_app, port=8012).ws == "none"
+
+
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")   # uvicorn's websockets import, on load()
 def test_mcp_listener_never_rewrites_the_peer_and_runs_no_lifespan(monkeypatch):
     # Even with the MCP subnet named as a proxy, X-Forwarded-For is not believed:

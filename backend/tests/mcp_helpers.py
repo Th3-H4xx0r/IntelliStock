@@ -18,8 +18,11 @@ from mcp_policy import McpConfig
 
 MCP_TOKEN = "t" * 40
 
-# Socket peers inside and outside the default MCP_ALLOWED_CIDR (172.31.250.0/24).
-PEER_IN = "172.31.250.7"
+# Socket peers inside and outside the default MCP_ALLOWED_CIDR (172.31.250.10/32,
+# the mcp container's pinned address on mcp_net). PEER_GATEWAY is mcp_net's host
+# gateway: on the subnet, but not the mcp container, so outside the default.
+PEER_IN = "172.31.250.10"
+PEER_GATEWAY = "172.31.250.1"
 PEER_OUT = "10.9.9.9"
 
 # Shared constants. Time-dependent tests monkeypatch mcp_policy.utc_now (and the

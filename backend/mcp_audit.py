@@ -58,9 +58,10 @@ def _normalize_key(name: str) -> str:
 
 def is_secret_key(name: str) -> bool:
     """True for a secret-named key: after normalizing case, camelCase and hyphens,
-    an exact name in SECRET_KEY_NAMES or a suffix in SECRET_KEY_SUFFIXES."""
-    normalized = _normalize_key(name)
-    return normalized in SECRET_KEY_NAMES or normalized.endswith(SECRET_KEY_SUFFIXES)
+    an exact name in SECRET_KEY_NAMES or a suffix in SECRET_KEY_SUFFIXES. The
+    lower-cased name is tried as well, so passWord (normalized pass_word) is caught."""
+    return any(n in SECRET_KEY_NAMES or n.endswith(SECRET_KEY_SUFFIXES)
+               for n in (_normalize_key(name), name.replace("-", "_").lower()))
 
 
 def redact_secrets(value: object) -> object:

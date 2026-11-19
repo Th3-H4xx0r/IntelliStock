@@ -70,6 +70,13 @@ def test_summary_formats():
      "close_position GLD on a — MONEY STATE UNKNOWN"),
     (("live_command", "POST", "/i/a/live-command", {"instance_id": "a"}, {"type": "halt"}, "live"),
      "halt on a — LIVE"),
+    # A dollar-sized live order: the push is the decision surface, so it shows the amount.
+    (("live_command", "POST", "/i/a/live-command", {"instance_id": "alpaca-main"},
+      {"type": "submit_order", "payload": {"symbol": "TQQQ", "side": "buy", "notional": 500}}, "live"),
+     "submit_order BUY $500 TQQQ on alpaca-main — LIVE"),
+    (("live_command", "POST", "/i/a/live-command", {"instance_id": "a"},
+      {"type": "submit_order", "payload": {"symbol": "TQQQ", "side": "sell"}}, "live"),
+     "submit_order SELL ? TQQQ on a — LIVE"),
     (("brokerage_place_order", "POST", "/brokerages/b1/orders", {"brokerage_id": "b1"},
       {"symbol": "SPY", "side": "sell", "qty": "2", "type": "limit"}, "live"),
      "SELL 2 SPY limit on brokerage b1 — LIVE"),

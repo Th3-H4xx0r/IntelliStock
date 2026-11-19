@@ -96,6 +96,15 @@ def _text(value: object) -> str:
     return " ".join(flat.split()) or "?"
 
 
+def _amount(qty: object, notional: object) -> str:
+    """An order's size for the push: the quantity, else "$" and the notional, else "?"."""
+    if qty not in (None, ""):
+        return _text(qty)
+    if notional not in (None, ""):
+        return "$" + _text(notional)
+    return "?"
+
+
 def _summary_core(operation_id: str, method: str, path: str, path_params: Mapping[str, str],
                   body: object) -> str:
     fields = body if isinstance(body, dict) else {}
@@ -105,19 +114,14 @@ def _summary_core(operation_id: str, method: str, path: str, path_params: Mappin
         payload = payload if isinstance(payload, dict) else {}
         command = _text(fields.get("type"))
         if fields.get("type") == "submit_order":
-            return (f"submit_order {_text(payload.get('side')).upper()} {_text(payload.get('qty'))} "
+            amount = _amount(payload.get("qty"), payload.get("notional"))
+            return (f"submit_order {_text(payload.get('side')).upper()} {amount} "
                     f"{_text(payload.get('symbol'))} on {instance}")
         symbol = payload.get("symbol")
         target = f" {_text(symbol)}" if symbol not in (None, "") else ""
         return f"{command}{target} on {instance}"
     if operation_id == "brokerage_place_order":
-        qty, notional = fields.get("qty"), fields.get("notional")
-        if qty not in (None, ""):
-            amount = _text(qty)
-        elif notional not in (None, ""):
-            amount = "$" + _text(notional)
-        else:
-            amount = "?"
+        amount = _amount(fields.get("qty"), fields.get("notional"))
         order_type = fields.get("type")
         return (f"{_text(fields.get('side')).upper()} {amount} {_text(fields.get('symbol'))} "
                 f"{'market' if order_type is None else _text(order_type)} "

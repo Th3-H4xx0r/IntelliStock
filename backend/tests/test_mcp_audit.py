@@ -50,6 +50,8 @@ def test_is_secret_key_exact_names_and_suffixes():
     "KALSHI_PRIVATE_KEY", "private_key", "privateKey", "PrivateKey", "privatekey",
     "apiKey", "APIKey", "X-Api-Key", "x-api-key", "accessToken", "clientSecret",
     "secret_auth_key", "secretAuthKey",
+    # camelCase splits these into pass_word / pass_phrase; the lower-cased name still matches.
+    "passWord", "PassWord", "passPhrase", "PassPhrase",
 ])
 def test_camel_case_and_hyphen_variants_are_secret(name):
     assert is_secret_key(name)

@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
+from unittest.mock import Mock
 
 import pytest
 
@@ -62,6 +64,42 @@ def test_mcp_retention_and_indexes():
     assert a.notify is False and i.notify is False
     assert schema.spec("McpApprovals").indexed_fields == ("status", "user_id", "created_at")
     assert "ts" in a.indexed_fields and "created_at" in i.indexed_fields
+
+
+def _boot_api(monkeypatch):
+    """Run the API's startup hook, with its connection shim stubbed and no retry sleep."""
+    from api import main
+    monkeypatch.setattr(main, "get_conn", lambda: Mock())
+    monkeypatch.setattr(main, "count_users", lambda conn: 1)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    main.api_startup_ensure_auth_tables()
+
+
+def test_api_startup_creates_the_mcp_tables(monkeypatch):
+    """Registering a table does not create it, and nothing on deploy runs a bare
+    ensure_schema() (the MoveEvents bug, 88cf3549). The Postgres store does not
+    create a missing table either, so the API's startup hook must create all four
+    before the first MCP call or device enrolment reaches them."""
+    requested = []
+
+    def fake_ensure_schema(*, tables=None):
+        requested.extend(["<every table>"] if tables is None else list(tables))
+        return []
+
+    monkeypatch.setattr(schema, "ensure_schema", fake_ensure_schema)
+    _boot_api(monkeypatch)
+    assert set(NAMES) <= set(requested), requested
+    assert "<every table>" not in requested
+
+
+@requires_pg
+def test_api_startup_creates_the_mcp_tables_on_an_empty_database(pg_schema, monkeypatch):
+    # The store fixture runs a full ensure_schema() and so hides a missing table;
+    # pg_schema starts from no tables at all, as production did before deploy.
+    from db import store as real_store
+    _boot_api(monkeypatch)
+    for name in NAMES:
+        assert real_store.count(name) == 0, name
 
 
 @requires_pg

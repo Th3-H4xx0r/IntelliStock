@@ -8,7 +8,8 @@ time (ValueError) and at request time (None, treated as "not available").
 ``McpConfig`` is the MCP_* environment, parsed once per read. An unset variable
 takes its contract default (§7); a set one is taken as written, so an empty
 MCP_PROTECTED_INSTANCES means "protect nothing" and an unparseable
-MCP_ALLOWED_CIDR disables the listener rather than widening it.
+MCP_ALLOWED_CIDR, or one of prefix length 0, disables the listener rather than
+widening it.
 
 Every hash the gate compares (body_sha256, argument digests, the schema hash) is
 the sha256 hex of ``canonical_json``, the one formula the contract pins.
@@ -32,7 +33,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from db import store
-from kalshi.mode import is_real_mode
 
 _log = logging.getLogger(__name__)
 
@@ -119,11 +119,14 @@ def _env_set(env: Mapping[str, str], name: str, default: str, *, upper: bool = F
 
 def _env_cidr(env: Mapping[str, str], name: str,
               default: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
+    """The network named, or None (the listener stays off) when it does not parse
+    or admits every address: prefix length 0 is refused, as FORWARDED_ALLOW_IPS is."""
     raw = env.get(name)
     try:
-        return ipaddress.ip_network((default if raw is None else raw).strip(), strict=False)
+        network = ipaddress.ip_network((default if raw is None else raw).strip(), strict=False)
     except ValueError:
         return None
+    return None if network.prefixlen == 0 else network
 
 
 @dataclass(frozen=True)
@@ -158,7 +161,7 @@ class McpConfig:
             enabled=(env.get("MCP_ENABLED") or "").strip().lower() in _TRUE_WORDS,
             service_token=token or None,
             port=_env_int(env, "MCP_API_PORT", 8012),
-            allowed_cidr=_env_cidr(env, "MCP_ALLOWED_CIDR", "172.31.250.0/24"),
+            allowed_cidr=_env_cidr(env, "MCP_ALLOWED_CIDR", "172.31.250.10/32"),
             protected_instances=_env_set(env, "MCP_PROTECTED_INSTANCES", "f14-paper,swing-paper"),
             protected_accounts=_env_set(env, "MCP_PROTECTED_ACCOUNTS", "PA37JPXGU196", upper=True),
             approval_ttl_s=_env_int(env, "MCP_APPROVAL_TTL_S", 900),
@@ -243,6 +246,10 @@ def instance_money(inst: dict, brokerages: Mapping[str, dict | None]) -> str:
     A Kalshi account is paper or real per instance, so a Kalshi instance reads
     its brokerage's environment and its own kalshi_config, never alpaca_paper.
     Demo counts as paper: its orders execute, on fake money (plan Decision 3).
+    On a live account only a stored paper_mode of exactly True is paper:
+    PATCH .../kalshi/config re-derives live_enabled = live and not paper on every
+    call, so a body without paper_mode sent to a bot stored paper_mode false
+    turns real orders on, whatever its stored live_enabled says.
     """
     brokerage_id = inst.get("brokerage_id")
     if not brokerage_id:
@@ -255,8 +262,7 @@ def instance_money(inst: dict, brokerages: Mapping[str, dict | None]) -> str:
         return "paper"
     if env in ("live", "prod"):
         cfg = inst.get("kalshi_config") or {}
-        real = is_real_mode(env, bool(cfg.get("live_enabled")), bool(cfg.get("paper_mode")))
-        return "live" if real else "paper"
+        return "paper" if cfg.get("paper_mode") is True else "live"
     return "unknown"
 
 

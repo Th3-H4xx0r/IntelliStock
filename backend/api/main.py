@@ -293,6 +293,9 @@ def api_startup_ensure_auth_tables():
                     ensure_chatbot_tables(conn)
                 except Exception as ce:
                     log.warning("Chatbot table init failed: %s", ce)
+                # The MCP gate's tables. Registering a table does not create
+                # it; a failure here retries like the Users table.
+                mcp_gate.ensure_mcp_tables()
                 if attempt > 1:
                     log.info("Auth table setup succeeded on attempt %d", attempt)
                 try:

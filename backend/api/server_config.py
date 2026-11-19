@@ -150,11 +150,13 @@ def build_mcp_uvicorn_config(app, *, port: int) -> uvicorn.Config:
 
     IPv4 only (0.0.0.0) and no proxy headers, so the gate sees the raw socket
     peer. Lifespan is off, so the app's startup and shutdown hooks run once, on
-    the public listener; and no Server header names the software.
+    the public listener; no Server header names the software; and no websocket
+    is served, so every scope on the port is an http one the gate checks.
     """
     config = build_uvicorn_config(app, host="0.0.0.0", port=port, proxy_headers=False)
     config.lifespan = "off"
     config.server_header = False
+    config.ws = "none"
     return config
 
 

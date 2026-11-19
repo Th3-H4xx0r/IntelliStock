@@ -310,6 +310,28 @@ def test_audit_rows_carry_the_hash_summary_and_money_state(probe, store):
     assert held["args_sha256"] == canonical_request_sha256("POST", "/probe/instances/alpaca-main/act", {}, {"qty": 1})
 
 
+def test_kalshi_patch_that_would_turn_real_orders_on_is_held(monkeypatch, store):
+    """Final review I1, through the real route. PATCH .../kalshi/config re-derives
+    the mode on every call, so a rename sent to a live-brokerage bot stored
+    paper_mode false + live_enabled false would write live_enabled true and place
+    real orders. The gate must hold it, and the stored config must not change."""
+    from api import main
+    stored = {"paper_mode": False, "live_enabled": False}
+    store.insert("Instances", {"id": "kalshi-off", "brokerage_id": "b-kalshi-live", "kind": "kalshi",
+                               "name": "bot", "kalshi_config": dict(stored)})
+    monkeypatch.setattr(main, "db_store", store)
+    main.app.dependency_overrides[main.conn_dependency] = lambda: None
+    try:
+        res = mcp_client(main.app).patch("/instances/kalshi-off/kalshi/config",
+                                         json={"name": "renamed"}, headers=IDEM())
+    finally:
+        main.app.dependency_overrides.pop(main.conn_dependency, None)
+    assert res.status_code == 202, res.text
+    assert res.json()["pending_approval"]["money_state"] == "live"
+    row = store.get("Instances", "kalshi-off")
+    assert (row["name"], row["kalshi_config"]) == ("bot", stored)
+
+
 def test_gate_covers_routes_without_get_current_user(monkeypatch):
     from api import main
     c = mcp_client(main.app)

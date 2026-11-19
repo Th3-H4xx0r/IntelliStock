@@ -36,8 +36,9 @@ live trading and start LLM spend, so every MCP call to it waits for approval.
   - :8012 (MCP_API_PORT) — MCP only. proxy_headers=False.
 - A request is the MCP principal only if ALL hold:
   - it arrived on the :8012 listener (scope["server"][1] == MCP_API_PORT);
-  - its raw socket peer IP is inside MCP_ALLOWED_CIDR (default 172.31.250.0/24, the
-    fixed subnet of the compose network mcp_net);
+  - its raw socket peer IP is inside MCP_ALLOWED_CIDR (default 172.31.250.10/32, the
+    mcp container's pinned address on the compose network mcp_net, subnet
+    172.31.250.0/24; mcp_net's host gateway 172.31.250.1 is outside it);
   - Authorization: Bearer <MCP_SERVICE_TOKEN> (hmac.compare_digest; token >= 32 bytes);
   - X-MCP-Acting-User names an existing user id;
   - MCP_ENABLED is true (default false — the kill switch is "unset it").
@@ -45,13 +46,15 @@ live trading and start LLM spend, so every MCP call to it waits for approval.
   On :8012 the body is {"detail": "mcp: unauthenticated"}; on :8011 the service token
   gets the same 401 as a bad JWT.
 - The :8012 listener binds IPv4 only (0.0.0.0). The peer check reads the raw socket
-  peer and refuses an IPv4-mapped IPv6 address (::ffff:172.31.250.7), which a
+  peer and refuses an IPv4-mapped IPv6 address (::ffff:172.31.250.10), which a
   dual-stack bind would hand it. The listener starts only when MCP_ENABLED is true,
-  MCP_SERVICE_TOKEN is at least 32 bytes and MCP_ALLOWED_CIDR parses. MCP_API_PORT
+  MCP_SERVICE_TOKEN is at least 32 bytes and MCP_ALLOWED_CIDR parses with a prefix
+  length above 0 (0.0.0.0/0 and ::/0 leave the listener off). MCP_API_PORT
   must differ from API_PORT: when they are equal, the API logs one ERROR naming both
   ports and starts the public listener alone, and the gate treats every request on
   that port as public (the service token there gets the bad-JWT 401). :8012 runs with lifespan off (startup hooks run once, on
-  :8011), sends no Server header, and stops when the public listener stops.
+  :8011), sends no Server header, serves no websockets (ws "none"), and stops when the
+  public listener stops.
 - Principal dict returned by get_current_user for MCP requests:
   {"id": <user id>, "username": <username>, "via": "mcp", "client": <X-MCP-Client or "jarvis">}
   Human principals are unchanged ({"id", "username"}; no "via" key).
@@ -86,8 +89,10 @@ Additions from build C:
 - The 415 is stricter than FastAPI. On :8012 a missing Content-Type, or
   application/*+json, is refused even where FastAPI would parse the body, and so are
   NaN and Infinity. D always sends application/json.
-- Every completed response is stored under its key: 4xx, 5xx and the 202 included. A
-  call whose route raises releases the key, so a retry runs. A stored body over
+- Every response the route completes is stored under its key, 4xx and 5xx included,
+  and so is a held call's 202. The gate's own refusals (401, 403, 413, 415, 428, 409
+  and 429) are not stored, so a retry after one is checked again. A call whose route
+  raises releases the key, so a retry runs. A stored body over
   1048576 bytes is not kept; its replay is the stored status with
   {"detail": "mcp: original response too large to replay"} and the replay header.
 - 429 details: "mcp: call rate cap reached", "mcp: write rate cap reached",
@@ -123,9 +128,10 @@ service token + CIDR + listener are; acting user header optional)
   60 s and refetches the schema when it changes. On :8012, /health and /internal/mcp/*
   need only the service token + CIDR + listener (no X-MCP-Acting-User); every other
   route on :8012 needs the full MCP principal.
-- With MCP_ENABLED off, every :8012 request, /health and /internal/mcp/* included,
-  answers 401 {"detail": "mcp: unauthenticated"}. The /internal/mcp/* routes answer the
-  same 401 on :8011.
+- With MCP_ENABLED off the :8012 listener does not start, so nothing answers there;
+  a request that reaches the gate on that port anyway, /health and /internal/mcp/*
+  included, answers 401 {"detail": "mcp: unauthenticated"}. The /internal/mcp/* routes
+  answer the same 401 on :8011.
 - verify-password: the limiter is keyed (username, "mcp") only, with no per-IP
   bucket. Every MCP login arrives from the one MCP server, so a shared bucket would
   let a spray of made-up names lock the operator out. The 429 detail is
@@ -202,11 +208,12 @@ pending → expired.
 
 McpApprovals, McpApprovalDevices, McpIdempotency (TTL 24 h), McpAudit (retention 365 d).
 Field lists live in C's plan (docs/superpowers/plans/2026-11-19-mcp-api-gate.md,
-Task 3); D and E only see them through the endpoints above. Additions to those lists:
-- McpApprovals carries the internal field exec_started_at. Approving sets
-  exec_claimed_at in the same write as status "approved", and the replay's one
-  execution is a compare-and-swap on exec_started_at being null. Neither field is in
-  the Approval object.
+Task 3); D and E only see them through the endpoints above. The API's startup hook
+creates all four (registering a table does not create it). Additions to those lists:
+- McpApprovals carries two internal fields, exec_claimed_at and exec_started_at.
+  Approving sets exec_claimed_at in the same write as status "approved", and the
+  replay's one execution is a compare-and-swap on exec_started_at being null. Neither
+  field is in the Approval object.
 - McpAudit.status 499 records a client that hung up before its body was complete; no
   response is sent. McpAudit.outcome "rejected" marks the second 415 (JSON the gate
   cannot process).
@@ -214,7 +221,7 @@ Task 3); D and E only see them through the endpoints above. Additions to those l
 ## 7. Environment
 
 api service: MCP_ENABLED, MCP_SERVICE_TOKEN, MCP_API_PORT=8012,
-MCP_ALLOWED_CIDR=172.31.250.0/24, MCP_PROTECTED_INSTANCES=f14-paper,swing-paper,
+MCP_ALLOWED_CIDR=172.31.250.10/32, MCP_PROTECTED_INSTANCES=f14-paper,swing-paper,
 MCP_PROTECTED_ACCOUNTS=PA37JPXGU196, MCP_APPROVAL_TTL_S=900, cap knobs
 (MCP_CAP_COST_PER_DAY=20, MCP_CAP_APPROVALS_PER_DAY=50, MCP_CAP_CALLS_PER_MIN=60,
 MCP_CAP_WRITES_PER_MIN=10, MCP_CAP_CONCURRENT_BACKTESTS=1), MCP_MAX_BODY_BYTES=1048576 (the
@@ -229,4 +236,5 @@ MCP_DATA_DIR=/data, MCP_JARVIS_CLIENT_ID, MCP_JARVIS_REDIRECT_URI
 variables: alerts go through POST /internal/mcp/audit-event and the API relays them.
 
 compose: network mcp_net (ipam subnet 172.31.250.0/24); api joins it in addition to its
-current networks; mcp joins ONLY mcp_net; mcp publishes "127.0.0.1:8090:8090".
+current networks; mcp joins ONLY mcp_net, pinned to ipv4_address 172.31.250.10 (the
+MCP_ALLOWED_CIDR default); mcp publishes "127.0.0.1:8090:8090".
