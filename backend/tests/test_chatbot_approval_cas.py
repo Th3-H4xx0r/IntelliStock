@@ -7,12 +7,14 @@ tests pin the primitive the approval paths claim through:
 ``conversations.transition_message``, built on ``store.replace_if`` guarded by
 the doc's ``updated_at`` and a ``rev`` token every CAS write rewrites.
 
-The helpers below (``conv``, ``_seed``, ``_StoreProxy``, ``_RacingStore``) are
-written for reuse by the approval-path tests (mcp_bridge, orchestration).
+The helpers below (``conv``, ``_seed``, ``_StoreProxy``, ``_RacingStore``,
+``_race``) are written for reuse by the approval-path tests (mcp_bridge,
+orchestration).
 """
 import os
 import sys
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -95,6 +97,27 @@ class _RacingStore:
             self._barrier.wait()
         with self._lock:
             return self._inner.replace_if(*args, **kwargs)
+
+
+def _race(fn_a, fn_b):
+    """Run fn_a and fn_b on two threads at once. Returns one entry per
+    function, in argument order: ("ok", its return value) or ("err", the
+    exception it raised)."""
+    outcomes = [None, None]
+
+    def run(i, fn):
+        try:
+            outcomes[i] = ("ok", fn())
+        except Exception as e:
+            outcomes[i] = ("err", e)
+
+    threads = [threading.Thread(target=run, args=(i, fn)) for i, fn in enumerate((fn_a, fn_b))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert None not in outcomes, "a racing call never finished"
+    return outcomes
 
 
 # ── transition_message / the CAS primitive ─────────────────────────────────
@@ -220,3 +243,96 @@ def test_concurrent_append_survives_a_transition(conv, store, monkeypatch):
     doc = conv.get_conversation(None, "u1", cid)
     assert "late reply" in [m.get("content") for m in doc["messages"]]
     assert conv.find_message(doc, mid)["status"] == "executing"
+
+
+# ── resolve_mcp_pending: approvals claim before they execute ────────────────
+
+
+def _mcp(conv, store, monkeypatch, *, racing=False, **seed):
+    """Seed one fake_write approval and wire mcp_bridge to a recording tool.
+
+    ``calls`` collects the tool's arguments per run and ``appended`` every
+    message resolve_mcp_pending appends (append_messages is SQL, which the
+    FakeStore cannot run). ``racing`` puts a _RacingStore under the
+    conversation store; the single-thread tests keep the plain one, whose
+    writes would otherwise wait at the two-party barrier."""
+    from chatbot import mcp_bridge
+
+    cid, mid = _seed(conv, store, **seed)
+    if racing:
+        monkeypatch.setattr(conv, "store", _RacingStore(store))
+    calls, appended = [], []
+    tool = SimpleNamespace(name="fake_write", safety="write", description="",
+                           executor=lambda ctx, args: calls.append(dict(args)) or {"done": True})
+    monkeypatch.setattr(mcp_bridge, "get_tool", lambda n: tool if n == "fake_write" else None)
+    monkeypatch.setattr(conv, "append_messages", lambda c, u, cid_, msgs: appended.extend(msgs))
+
+    def resolve(approved):
+        return mcp_bridge.resolve_mcp_pending(conn=None, user={"id": "u1", "username": "op"},
+                                              conversation_id=cid, message_id=mid, approved=approved)
+
+    return SimpleNamespace(cid=cid, mid=mid, calls=calls, appended=appended,
+                           approve=lambda: resolve(True), decline=lambda: resolve(False))
+
+
+def test_two_concurrent_mcp_approvals_execute_once(conv, store, monkeypatch):
+    m = _mcp(conv, store, monkeypatch, racing=True)
+    outcomes = _race(m.approve, m.approve)
+    assert m.calls == [{"qty": 1}]
+    assert sorted(k for k, _ in outcomes) == ["err", "ok"]
+    err = next(v for k, v in outcomes if k == "err")
+    assert isinstance(err, ValueError) and "no pending tool" in str(err)
+    final = conv.find_message(conv.get_conversation(None, "u1", m.cid), m.mid)
+    assert final["status"] == "complete" and final["pending_tool"] is None
+    assert [msg["role"] for msg in m.appended] == ["tool"]
+
+
+def test_concurrent_mcp_approve_and_decline_apply_exactly_one(conv, store, monkeypatch):
+    m = _mcp(conv, store, monkeypatch, racing=True)
+    outcomes = _race(m.approve, m.decline)
+    assert [k for k, _ in outcomes].count("ok") == 1
+    declined = any("user_declined" in (msg.get("content") or "") for msg in m.appended)
+    assert len(m.calls) + int(declined) == 1 and len(m.appended) == 1
+
+
+def test_mcp_approval_of_an_executing_message_never_runs(conv, store, monkeypatch):
+    m = _mcp(conv, store, monkeypatch, status="executing")
+    with pytest.raises(ValueError, match="no pending tool"):
+        m.approve()
+    assert m.calls == []
+
+
+def test_mcp_sequential_double_approve_runs_once(conv, store, monkeypatch):
+    m = _mcp(conv, store, monkeypatch)
+    m.approve()
+    with pytest.raises(ValueError, match="no pending tool"):
+        m.approve()
+    assert len(m.calls) == 1
+
+
+def test_mcp_result_is_kept_when_the_row_moved_on_while_the_tool_ran(conv, store, monkeypatch):
+    """The tool ran, so its result is appended even when the claimed row is
+    no longer "executing" by the time it finishes (here the thread was
+    cleared mid-run)."""
+    from chatbot import mcp_bridge
+
+    m = _mcp(conv, store, monkeypatch)
+
+    def clear_then_run(ctx, args):
+        store.update(conv.TABLE, m.cid, {"messages": [], "message_count": 0})
+        m.calls.append(dict(args))
+        return {"done": True}
+
+    monkeypatch.setattr(mcp_bridge, "get_tool", lambda n: SimpleNamespace(
+        name=n, safety="write", description="", executor=clear_then_run))
+    out = m.approve()
+    assert m.calls == [{"qty": 1}]
+    assert [msg["role"] for msg in out] == ["tool"] and m.appended == out
+
+
+def test_mcp_wrong_source_is_rejected_before_any_claim(conv, store, monkeypatch):
+    m = _mcp(conv, store, monkeypatch, source="orchestration")
+    with pytest.raises(ValueError, match="wasn't produced by claude-cli"):
+        m.approve()
+    assert conv.find_message(conv.get_conversation(None, "u1", m.cid), m.mid)["status"] == "pending_confirmation"
+    assert m.calls == []

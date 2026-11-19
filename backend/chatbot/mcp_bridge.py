@@ -200,23 +200,42 @@ def resolve_mcp_pending(
     """User-confirm path. Find the queued pending row, execute (or
     decline) the captured tool call, and append result messages to the
     conversation. Returns the new messages so the API layer can hand
-    them back to the frontend for immediate rendering."""
+    them back to the frontend for immediate rendering.
+
+    The row is claimed with a compare-and-swap before anything acts on
+    it: of two near-simultaneous confirms that both read "pending", one
+    wins and the other gets the "no pending tool" ValueError, so the
+    tool runs at most once."""
     user_id = user.get("id")
     if not user_id:
         raise ValueError("authenticated user has no id")
     convo = conv_store.get_conversation(conn, user_id, conversation_id)
     if not convo:
         raise ValueError(f"conversation {conversation_id} not found")
+    not_pending = f"no pending tool found on message {message_id!r}"
     pending_msg = conv_store.find_message(convo, message_id)
-    if not pending_msg or pending_msg.get("status") != "pending_confirmation":
-        raise ValueError(f"no pending tool found on message {message_id!r}")
-    pending_payload = pending_msg.get("pending_tool") or {}
-    if pending_payload.get("source") != "claude-cli-mcp":
+    if not pending_msg or pending_msg.get("status") != conv_store.STATUS_PENDING:
+        raise ValueError(not_pending)
+    if (pending_msg.get("pending_tool") or {}).get("source") != "claude-cli-mcp":
         raise ValueError(
             "mcp-confirm endpoint received a pending row that wasn't produced by claude-cli; "
             "use /chatbot/conversations/{id}/confirm-tool for the standard flow."
         )
 
+    # Approve moves the row to "executing" while the tool runs; decline
+    # resolves it outright. Either way the swap only succeeds from
+    # "pending", so an approve racing a decline applies exactly one.
+    claimed = conv_store.transition_message(
+        conn, user_id, conversation_id, message_id,
+        expect_status=conv_store.STATUS_PENDING,
+        changes=(
+            {"status": conv_store.STATUS_EXECUTING} if approved
+            else {"status": conv_store.STATUS_COMPLETE, "pending_tool": None}
+        ),
+    )
+    if claimed is None:
+        raise ValueError(not_pending)
+    pending_payload = claimed.get("pending_tool") or {}
     tool_name = pending_payload.get("name") or ""
     arguments = pending_payload.get("arguments") or {}
     tool_call_id = pending_payload.get("tool_call_id") or message_id
@@ -224,17 +243,10 @@ def resolve_mcp_pending(
     appended: List[Dict[str, Any]] = []
 
     if not approved:
-        # Resolve the pending row to "declined" so the UI stops showing
-        # the confirm card, then append a tool-result message recording
-        # the decline. We don't push that result back to CC; the CC
-        # session is idle and the user will summarise on the next turn
-        # if they want CC to incorporate the outcome.
-        resolved = {
-            **pending_msg,
-            "status": "complete",
-            "pending_tool": None,
-        }
-        conv_store.replace_message(conn, user_id, conversation_id, message_id, resolved)
+        # Append a tool-result message recording the decline. We don't
+        # push that result back to CC; the CC session is idle and the
+        # user will summarise on the next turn if they want CC to
+        # incorporate the outcome.
         decline_msg = conv_store.new_message(
             "tool",
             content=json.dumps({
@@ -249,7 +261,7 @@ def resolve_mcp_pending(
         conv_store.append_messages(conn, user_id, conversation_id, appended)
         return appended
 
-    # Approved: execute and append the result.
+    # Approved and claimed: execute and append the result.
     exec_result = _execute_tool(
         conn=conn, user=user, tool_name=tool_name, arguments=arguments,
     )
@@ -262,12 +274,18 @@ def resolve_mcp_pending(
     if blocks:
         tool_msg["blocks"] = blocks
 
-    resolved = {
-        **pending_msg,
-        "status": "complete",
-        "pending_tool": None,
-    }
-    conv_store.replace_message(conn, user_id, conversation_id, message_id, resolved)
+    done = conv_store.transition_message(
+        conn, user_id, conversation_id, message_id,
+        expect_status=conv_store.STATUS_EXECUTING,
+        changes={"status": conv_store.STATUS_COMPLETE, "pending_tool": None},
+    )
+    if done is None:
+        # The tool ran, so its result is still appended below.
+        _log(
+            f"tool={tool_name} ran but message {message_id!r} was no longer "
+            "executing; appending its result anyway",
+            "yellow",
+        )
     appended.append(tool_msg)
     conv_store.append_messages(conn, user_id, conversation_id, appended)
     return appended
