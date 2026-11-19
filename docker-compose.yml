@@ -223,6 +223,62 @@ services:
         condition: service_started
       neo4j:
         condition: service_started
+    # default stays listed: declaring networks drops the implicit one, which
+    # Postgres and every other service are on. mcp_net is how the MCP server
+    # reaches the api's private MCP port.
+    networks:
+      - default
+      - mcp_net
+
+  mcp:
+    # MCP server for the operator's Jarvis agent (backend/mcp_server): its own
+    # OAuth sign-in in front of the api's private MCP port. Reachable only on
+    # 127.0.0.1:8090, which tailscale serve on the host fronts: no Traefik labels.
+    # No env_file either, so none of the stack's other secrets reach it, and no
+    # docker.sock. Until its settings are complete it idles: /healthz answers and
+    # everything else is 503. One uvicorn worker, by design (see __main__.py).
+    # Admin CLI: docker exec -it intellistock-mcp python -m mcp_server.admin <command>
+    build:
+      context: ./backend/mcp_server
+      dockerfile: Dockerfile
+    # Pinned tag, for the Dokploy project-slug reason given on the frontend service.
+    image: intellistock-mcp
+    container_name: intellistock-mcp
+    restart: unless-stopped
+    depends_on:
+      - api
+    networks:
+      - mcp_net
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      # The auth store (mcp_auth.sqlite3): users, passkeys, sessions, signing keys.
+      - mcp_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    environment:
+      - MCP_API_BASE=${MCP_API_BASE:-http://api:8012}
+      - MCP_SERVICE_TOKEN=${MCP_SERVICE_TOKEN:-}
+      - MCP_PUBLIC_BASE=${MCP_PUBLIC_BASE:-}
+      - MCP_RP_ID=${MCP_RP_ID:-}
+      - MCP_DATA_DIR=/data
+      - MCP_JARVIS_CLIENT_ID=${MCP_JARVIS_CLIENT_ID:-jarvis}
+      - MCP_JARVIS_REDIRECT_URI=${MCP_JARVIS_REDIRECT_URI:-}
+      - MCP_TOTP_ENC_KEY=${MCP_TOTP_ENC_KEY:-}
+      - MCP_EXTRA_ALLOWED_HOSTS=${MCP_EXTRA_ALLOWED_HOSTS:-}
+      - MCP_LOG_LEVEL=${MCP_LOG_LEVEL:-info}
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    # Lose this before the live broker under memory pressure.
+    oom_score_adj: 1000
 
   price-service:
     image: intellistock-backend
@@ -545,3 +601,17 @@ volumes:
     name: codex_auth  # Plain name so spawned broker containers can mount it directly via Docker SDK
   app_updates: # iOS over-the-air update builds (api service only)
     name: intellistock_app_updates  # Plain name: a changed project slug must not orphan the builds
+  mcp_data: # The MCP server's auth store (mcp service only)
+    name: intellistock_mcp_data  # Plain name: a changed project slug must not orphan the enrolled sign-ins
+
+networks:
+  # The MCP server's private link to the api: only api and mcp join it, and the
+  # api's MCP port admits this subnet alone (MCP_ALLOWED_CIDR). The fixed name
+  # means a changed project slug cannot create a second network with an
+  # overlapping subnet.
+  mcp_net:
+    name: intellistock_mcp_net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
