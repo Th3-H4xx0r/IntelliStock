@@ -251,6 +251,18 @@ async def test_health_schema_hash_none_on_401():
         await wrong_token.aclose()
 
 
+async def test_deeply_nested_json_reads_as_text(fake, api):
+    # json.loads raises RecursionError, not ValueError, past ~1000 levels; the body is then not JSON.
+    nested = "[" * 100_000 + "]" * 100_000
+    fake.set_route("GET", "/deep", 200, nested.encode("ascii"))
+    resp = await api.request("GET", "/deep", acting_user="u-123")
+    assert (resp.status, resp.body, resp.text) == (200, None, nested)
+
+    fake.set_route("GET", "/internal/mcp/openapi.json", 200, nested.encode("ascii"))
+    with pytest.raises(ApiUnavailable):
+        await api.get_openapi()
+
+
 async def test_get_openapi_returns_doc_or_raises(fake, api):
     paths = {"/x": {"get": {"operationId": "get_x", "x-mcp": {"class": "read"}}}}
     fake.set_openapi({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": paths})

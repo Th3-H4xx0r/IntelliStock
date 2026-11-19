@@ -102,11 +102,12 @@ def _query_items(query: Mapping[str, Any]) -> list[tuple[str, str]]:
 
 
 def _parse_json(text: str) -> Any:
+    """The parsed JSON, or None when the text is empty, not JSON, or nested too deeply for json.loads."""
     if not text:
         return None
     try:
         return json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
 
 
