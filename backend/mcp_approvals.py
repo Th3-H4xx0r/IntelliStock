@@ -30,7 +30,9 @@ the row's body_sha256. An approval and the claim on its one execution are one
 compare-and-swap (exec_claimed_at is set with the status), so a crash at any
 point after approving leaves a claimed row that a read marks failed once stale,
 never one approved forever. The replay then consumes that claim exactly once
-(claim_execution) and records the outcome (record_result).
+(claim_execution) and records the outcome (record_result). With MCP_ENABLED off
+the kill switch stops pending agent actions too: a valid approval runs nothing
+and ends "failed" with MCP_DISABLED_RESULT; a deny still works.
 """
 from __future__ import annotations
 
@@ -451,6 +453,8 @@ NOT_FOUND_DETAIL = "approval not found"
 # The gate's NOT_AVAILABLE_DETAIL: an MCP principal is refused here as it is on :8012.
 MCP_PRINCIPAL_DETAIL = "mcp: operation not available"
 NOT_PENDING_DETAIL = "approval is no longer pending"
+MCP_DISABLED_DETAIL = "mcp: disabled"
+MCP_DISABLED_RESULT = {"error": "mcp disabled"}
 
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 _SIGNATURE_MAX_CHARS = 200        # a DER P-256 signature is at most 72 bytes, 96 base64 characters
@@ -521,12 +525,14 @@ def decide(approval_id: str, payload: dict, *, user: dict, cfg: McpConfig,
     403 an MCP principal, a ts more than SIGNATURE_MAX_SKEW_S from now, a device
     that is not the user's active one, or a bad signature; 404 a malformed,
     unknown or foreign id; 409 not pending (or another decision won); 410 past
-    expires_at (the row becomes "expired" and is scrubbed).
+    expires_at (the row becomes "expired" and is scrubbed); 409
+    MCP_DISABLED_DETAIL for a valid approve while cfg.enabled is off (the row
+    becomes "failed" with MCP_DISABLED_RESULT, result_status null, and nothing
+    runs).
 
     "approve" sets status, decided_at, device_id and exec_claimed_at in one
     write; the caller then replays the call. "deny" is terminal and scrubbed in
-    the same write. cfg is accepted for the route's signature; the expiry is the
-    row's own expires_at.
+    the same write, whatever the switch. The expiry is the row's own expires_at.
     """
     decision, body_sha256, ts, device_id, signature = _decision_fields(payload)
     if user.get("via") == "mcp":
@@ -559,6 +565,14 @@ def decide(approval_id: str, payload: dict, *, user: dict, cfg: McpConfig,
         raise DecisionError(403, "signature does not verify")
     stamp = iso_utc(now)
     patch: dict = {"decided_at": stamp, "device_id": device_id}
+    if decision == "approve" and not cfg.enabled:
+        # The kill switch stops pending agent actions too (lead ruling): a valid
+        # approval is recorded, terminal and scrubbed, and nothing is replayed.
+        patch.update(status="failed", result=dict(MCP_DISABLED_RESULT), result_status=None,
+                     body=terminal_scrub(row)["body"])
+        if cas_status(approval_id, expect="pending", patch=patch) is None:
+            raise DecisionError(409, NOT_PENDING_DETAIL)
+        raise DecisionError(409, MCP_DISABLED_DETAIL)
     if decision == "approve":
         # Approved and claimed for execution in this one write, so no crash can
         # leave an approved row that no read would ever settle.

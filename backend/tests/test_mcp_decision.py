@@ -31,15 +31,17 @@ from mcp_approvals import (
     record_result, register_device, revoke_device, signed_message, verify_signature,
 )
 from mcp_helpers import (
-    CFG, IDEM, PRINCIPAL, T0, human_headers, human_token, make_probe_app, mcp_client, mcp_env,
+    CFG, IDEM, MCP_TOKEN, PRINCIPAL, T0, human_headers, human_token, make_probe_app, mcp_client, mcp_env,
     p256_keypair, public_client, seed_money_fixture, seed_operator, sign_decision, use_store,
 )
-from mcp_policy import iso_utc
+from mcp_policy import McpConfig, iso_utc
 
 OPERATOR = {"id": "u-op", "username": "operator"}
 LIVE_ACT = "/probe/instances/alpaca-main/act"
 NOT_EXECUTABLE = {"detail": "mcp: approval is not executable"}
 NOT_FOUND = {"detail": "approval not found"}
+# decide() with the switch on; CFG (mcp_helpers) has MCP_ENABLED unset, so it is off.
+ON = McpConfig.from_env({"MCP_ENABLED": "true", "MCP_SERVICE_TOKEN": MCP_TOKEN})
 
 
 @pytest.fixture(autouse=True)
@@ -161,7 +163,7 @@ def test_approval_and_execution_claim_are_one_write(store, probe, device, monkey
     app, calls = probe
     row = _hold(app, store)
     _at(monkeypatch, 5)
-    approved = decide(row["id"], decide_json(row, device, ts=_ts(5)), user=OPERATOR, cfg=CFG)
+    approved = decide(row["id"], decide_json(row, device, ts=_ts(5)), user=OPERATOR, cfg=ON)
     assert approved["status"] == "approved"
     assert approved["exec_claimed_at"] == approved["decided_at"] == iso_utc(T0 + timedelta(seconds=5))
     assert store.get(APPROVALS_TABLE, row["id"]) == approved
@@ -342,6 +344,54 @@ def test_mcp_principal_cannot_decide(store, probe, device):
     assert (err.value.status, err.value.detail) == (403, NOT_AVAILABLE_DETAIL)
 
 
+# -- the kill switch ----------------------------------------------------------------
+
+def test_approve_with_mcp_disabled_fails_without_running(store, probe, device, human, monkeypatch):
+    """With MCP_ENABLED off, a valid approval of a pending agent call runs nothing: it
+    ends "failed" and answers 409. The signature is still checked first."""
+    app, calls = probe
+    row = _hold(app, store, body={"qty": 1, "api_key": "AK"})
+    mcp_env(monkeypatch, MCP_ENABLED="false")
+    other_key, _ = p256_keypair()
+    _refused(app, store, calls, row, decide_json(row, device, key=other_key), human, 403)
+    res = _post(app, row, decide_json(row, device), human)
+    assert res.status_code == 409 and res.json() == {"detail": "mcp: disabled"}
+    assert calls["count"].get("probe_act", 0) == 0
+    stored = store.get(APPROVALS_TABLE, row["id"])
+    assert (stored["status"], stored["result"], stored["result_status"]) == \
+        ("failed", {"error": "mcp disabled"}, None)
+    assert (stored["decided_at"], stored["device_id"]) == (iso_utc(T0), device.id)
+    assert stored["exec_claimed_at"] is None and stored["body"] == {"qty": 1, "api_key": "[redacted]"}
+    assert stored["body_sha256"] == row["body_sha256"]
+    assert not [r for r in _audit_rows(store) if r["outcome"] in ("executed_approved", "replay_refused")]
+    # Terminal: switching MCP back on does not revive it.
+    mcp_env(monkeypatch)
+    again = _post(app, row, decide_json(row, device), human)
+    assert again.status_code == 409 and again.json() == {"detail": "approval is no longer pending"}
+    assert calls["count"].get("probe_act", 0) == 0
+    _at(monkeypatch, 3600)
+    assert mcp_approvals.get_visible(row["id"], viewer=OPERATOR, cfg=CFG)["status"] == "failed"
+
+
+def test_deny_with_mcp_disabled_is_denied(store, probe, device, human, monkeypatch):
+    app, calls = probe
+    row = _hold(app, store)
+    mcp_env(monkeypatch, MCP_ENABLED="false")
+    res = _post(app, row, decide_json(row, device, "deny"), human)
+    assert res.status_code == 200
+    assert (res.json()["status"], res.json()["result"], res.json()["result_status"]) == ("denied", None, None)
+    assert calls["count"].get("probe_act", 0) == 0
+
+
+def test_decide_reads_the_switch_from_cfg(store, probe, device):
+    app, _ = probe
+    row = _hold(app, store)
+    with pytest.raises(DecisionError) as err:
+        decide(row["id"], decide_json(row, device), user=OPERATOR, cfg=CFG)
+    assert (err.value.status, err.value.detail) == (409, "mcp: disabled")
+    assert _status(store, row) == "failed"
+
+
 # -- failed executions --------------------------------------------------------------
 
 def test_failed_replay_is_terminal(store, probe, device, human, monkeypatch):
@@ -374,7 +424,7 @@ def test_record_result_maps_status_codes(store, probe, device):
     for code, expected in ((200, "executed"), (202, "executed"), (299, "executed"), (199, "failed"),
                            (300, "failed"), (404, "failed"), (503, "failed")):
         row = _hold(app, store)
-        decide(row["id"], decide_json(row, device), user=OPERATOR, cfg=CFG)
+        decide(row["id"], decide_json(row, device), user=OPERATOR, cfg=ON)
         done = record_result(row["id"], status_code=code, result={"n": code})
         assert (done["status"], done["result_status"], done["result"]) == (expected, code, {"n": code})
         assert done["executed_at"] == iso_utc(T0)
@@ -389,7 +439,7 @@ def test_record_result_maps_status_codes(store, probe, device):
 def _approved(app, store, device, **hold) -> dict:
     """An approved, claimed row whose replay has not run (decide() without the route)."""
     row = _hold(app, store, **hold)
-    return decide(row["id"], decide_json(row, device), user=OPERATOR, cfg=CFG)
+    return decide(row["id"], decide_json(row, device), user=OPERATOR, cfg=ON)
 
 
 def test_replay_marker_is_one_shot(store, probe, device):
