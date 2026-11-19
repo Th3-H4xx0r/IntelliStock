@@ -434,9 +434,18 @@ _FORCE_SUBSCRIPTION_ARGS = ["--settings", _FORCE_SUBSCRIPTION_SETTINGS]
 
 
 # Argv that opens up the IntelliStock MCP server (and ONLY the
-# IntelliStock MCP server — CC's built-in Bash / Read / Edit / etc. stay
-# disabled). The session populates ``--mcp-config`` with the per-session
-# path at spawn time.
+# IntelliStock MCP server). The session populates ``--mcp-config`` with
+# the per-session path at spawn time.
+#
+# Built-in tools: ``--tools ""`` removes every CC built-in. Lab note
+# (2026-11-19, claude 2.1.328): without it, 24 built-ins — including
+# Bash, Read, Write, Edit, WebSearch and Task — were live under
+# ``--dangerously-skip-permissions``; ``--allowedTools`` grants
+# permission, it does not remove tools. With it, only ``mcp__*`` tools
+# remain and MCP calls succeed (61 tools tested): ``--tools`` governs
+# built-ins only, so it does not hide the MCP server's tools.
+# ``--tools`` is variadic, so it goes first and a flag always follows
+# its empty value — no later token can be read as a tool name.
 #
 # Permission-mode lab notes (CC 2.1.x running as root inside Docker):
 #
@@ -453,12 +462,14 @@ _FORCE_SUBSCRIPTION_ARGS = ["--settings", _FORCE_SUBSCRIPTION_SETTINGS]
 #     option we ship.
 #
 # Allow-list note:
-#   ``--allowedTools mcp__*`` (broad MCP glob) rather than
-#   ``mcp__intellistock__*``. The broader pattern is supported across
-#   more CC versions. With ``--strict-mcp-config`` pointing only at
-#   our config, this is functionally equivalent to restricting to
-#   IntelliStock tools.
+#   ``--allowedTools mcp__*`` is kept because it is the lab-verified way
+#   MCP calls go through without a permission mode. It is the broad MCP
+#   glob rather than ``mcp__intellistock__*``: the broader pattern is
+#   supported across more CC versions. With ``--strict-mcp-config``
+#   pointing only at our config, this is functionally equivalent to
+#   restricting to IntelliStock tools.
 _MCP_FLAGS_TEMPLATE = [
+    "--tools", "",                   # disable every built-in tool
     "--strict-mcp-config",
     "--no-session-persistence",
     "--disable-slash-commands",
@@ -1093,11 +1104,15 @@ def _build_chat_argv(
 ) -> List[str]:
     """Argv for a long-lived chatbot subprocess (stream-json in & out).
 
-    When ``mcp_config_path`` is provided, CC is launched with the
-    IntelliStock MCP server attached and tools restricted to
-    ``mcp__intellistock__*`` — CC's built-in Bash/Read/Edit/etc.
-    remain disabled. Without a config path, CC runs in pure-text mode
-    (no tools at all).
+    Every mode passes ``--tools ""``, so CC's built-in tools (Bash,
+    Read, Write, Edit, WebSearch, Task, ...) are never available.
+
+    When ``mcp_config_path`` is provided, CC is also launched with the
+    IntelliStock MCP server attached (``--strict-mcp-config``) and
+    ``--allowedTools mcp__*``, the lab-verified way MCP calls go through
+    without a permission mode; the MCP tools are the only tools the
+    session has (verified on claude 2.1.328). Without a config path, CC
+    runs in pure-text mode (no tools at all).
     """
     effective_extra = _merge_extra_args_with_effort(extra_args, _normalize_effort(effort))
     if mcp_config_path:

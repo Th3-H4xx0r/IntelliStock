@@ -265,35 +265,25 @@ class TestArgvBuilders:
         assert "--mcp-config" not in argv
         assert "--allowedTools" not in argv
 
-    def test_chat_argv_with_mcp_config_switches_to_allowedtools(self):
-        argv = _build_chat_argv(
-            cli_path="claude", model="x", system_prompt="hi",
-            extra_args=[],
-            mcp_config_path="/tmp/test-mcp.json",
-        )
-        # MCP path: --mcp-config provided + --allowedTools restricted to mcp__*
-        assert "--mcp-config" in argv
+    def test_chat_argv_with_mcp_config_disables_builtins_and_allows_mcp(self):
+        argv = _build_chat_argv(cli_path="claude", model="x", system_prompt="hi",
+                                extra_args=[], mcp_config_path="/tmp/test-mcp.json")
         assert argv[argv.index("--mcp-config") + 1] == "/tmp/test-mcp.json"
-        assert "--allowedTools" in argv
+        assert argv.count("--tools") == 1
+        i = argv.index("--tools")
+        assert argv[i + 1] == ""
+        assert argv[i + 2].startswith("--")          # variadic flag: nothing else may be eaten
         assert argv[argv.index("--allowedTools") + 1] == "mcp__*"
-        # And the bare "--tools ''" gate is NOT present (it would
-        # silently override --allowedTools).
-        if "--tools" in argv:
-            # The only legit reason to see --tools in MCP mode would be a
-            # caller-supplied extra_args entry, not our builder.
-            assert False, "MCP-mode argv shouldn't contain --tools"
-        # Safety baseline still on.
-        assert "--strict-mcp-config" in argv
-        assert "--no-session-persistence" in argv
-        assert "--disable-slash-commands" in argv
-        # --dangerously-skip-permissions is the only flag verified to
-        # let MCP tool invocations actually go through. CC refuses it
-        # when running as root, so the spawner drops privileges via
-        # Popen(user=...) — see ``CLAUDE_CLI_RUNTIME_USER`` env.
-        assert "--dangerously-skip-permissions" in argv
+        for flag in ("--strict-mcp-config", "--no-session-persistence",
+                     "--disable-slash-commands", "--dangerously-skip-permissions"):
+            assert flag in argv
         assert "--permission-mode" not in argv
-        assert "--allowedTools" in argv
-        assert argv[argv.index("--allowedTools") + 1] == "mcp__*"
+
+    @pytest.mark.parametrize("mcp_path", [None, "/tmp/test-mcp.json"])
+    def test_every_chat_mode_disables_builtin_tools(self, mcp_path):
+        argv = _build_chat_argv(cli_path="claude", model="x", system_prompt="hi",
+                                extra_args=["--effort", "high"], mcp_config_path=mcp_path)
+        assert argv[argv.index("--tools") + 1] == ""
 
     def test_structured_argv_has_json_schema(self):
         argv = _build_structured_argv(
