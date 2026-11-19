@@ -90,7 +90,9 @@ struct PendingSignalsSection: View {
                     sending: state.isDeciding(s.id) || actions.inFlight.contains(s.id),
                     refusal: state.refusals[s.id],
                     cash: cash,
-                    onDecide: { decide(s, $0) }
+                    regrading: state.isRegrading(s.id),
+                    onDecide: { decide(s, $0) },
+                    onRegrade: { regrade(s) }
                 )
             }
             // Approvals followed through their broker command.
@@ -154,16 +156,19 @@ struct PendingSignalsSection: View {
             actions.review = SwingOrderReview(
                 signal: signal,
                 decision: decision,
-                send: {
+                // The row the sheet shows when the operator swipes: a wheel
+                // approval names its regrade count (412 if it has changed).
+                send: { shown in
                     actions.inFlight.insert(signal.id)
                     actions.confirmRunning = true
                     defer {
                         actions.inFlight.remove(signal.id)
                         actions.confirmRunning = false
                     }
-                    return await model.decide(signal, decision)
+                    return await model.decide(shown, decision)
                 },
-                finished: { _ in onDecided() }
+                finished: { _ in onDecided() },
+                latest: { model.state.value?.signals.first { $0.id == signal.id } }
             )
             return
         }
@@ -181,6 +186,19 @@ struct PendingSignalsSection: View {
             },
             onError: { showToast(Toast(swingErrorText($0), style: .error)) }
         )
+    }
+
+    /// Re-scores a wheel card at today's prices. No confirmation: it never
+    /// changes the signal's status. A refusal shows as a toast; the card
+    /// itself shows the regrade's progress and result.
+    private func regrade(_ signal: SwingSignal) {
+        let model = model
+        let showToast = showToast
+        Task {
+            if let message = await model.regrade(signal) {
+                showToast(Toast(message, style: .error))
+            }
+        }
     }
 
     private func resend(_ signal: SwingSignal) {
@@ -208,7 +226,7 @@ struct PendingSignalsSection: View {
             return
         case .recorded:
             showToast(Toast(result.message, style: .success))
-        case .noLongerPending:
+        case .noLongerPending, .regraded:
             showToast(Toast(result.message, style: .info))
         case .failed:
             showToast(Toast(result.message, style: .error))
@@ -250,6 +268,12 @@ private struct SwingSignalHead: View {
                 Text(swingLaneLabel(signal))
                     .font(DS.Font.caption)
                     .foregroundStyle(DS.Text.secondary)
+                if signal.isManualRun {
+                    Text("Manual run")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .lineLimit(1)
+                }
                 Text(status)
                     .font(DS.Font.caption)
                     .foregroundStyle(statusColor)
@@ -278,7 +302,10 @@ private struct SwingSignalRows: View {
     /// Why the broker refused its last approval, when this device saw it.
     let refusal: SwingRefusal?
     let cash: Double?
+    /// This card's regrade request is in flight.
+    var regrading = false
     let onDecide: (String) -> Void
+    var onRegrade: () -> Void = {}
 
     @State private var expanded = false
 
@@ -293,6 +320,10 @@ private struct SwingSignalRows: View {
                 statusColor: swingScoreColor(s.score),
                 session: sessionLine(s)
             )
+
+            if s.isWheel {
+                SwingRegradeRows(signal: s, requesting: regrading, deciding: sending, onRegrade: onRegrade)
+            }
 
             StatGrid(columns: 2, horizontalSpacing: 16, verticalSpacing: 12) {
                 ForEach(Array(fields(s).enumerated()), id: \.offset) { _, field in
@@ -405,6 +436,82 @@ private struct SwingSignalRows: View {
                 .buttonStyle(.plain)
             }
         }
+    }
+}
+
+/// A wheel card's score and its regrade: when the score was made (and the
+/// stock price it was made at) beside Regrade, the progress while a regrade
+/// runs, a finished one's before → after lines, and its warning. Regrade
+/// never changes the signal's status, so Approve and Reject stay available
+/// throughout.
+private struct SwingRegradeRows: View {
+    let signal: SwingSignal
+    /// The regrade request is in flight.
+    let requesting: Bool
+    /// This card's decision is in flight.
+    let deciding: Bool
+    let onRegrade: () -> Void
+
+    var body: some View {
+        let s = signal
+        let now = Date()
+        let working = requesting || swingRegradePhase(s, now: now) == .live
+        let changes = swingRegradeChanges(s)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text(swingScoredAtText(s))
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if s.canRegrade {
+                    Button("Regrade", action: onRegrade)
+                        .buttonStyle(.dsSecondary)
+                        .disabled(working || deciding)
+                        .accessibilityHint("Scores this put again at today's prices. The card stays pending.")
+                }
+            }
+            if working {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(swingRegradeProgressText)
+                }
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+            }
+            if !changes.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(changes, id: \.label) { SwingRegradeChangeRow(change: $0) }
+                }
+            }
+            ForEach(swingRegradeWarnings(s, now: now), id: \.self) { SwingNoteRow(text: $0) }
+        }
+    }
+}
+
+/// "Stock  $140.00 → $151.20  +8.0%".
+private struct SwingRegradeChangeRow: View {
+    let change: SwingRegradeChange
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(change.label)
+                .foregroundStyle(DS.Text.muted)
+                .frame(width: 64, alignment: .leading)
+            Text("\(change.before) → \(change.after)")
+                .foregroundStyle(DS.Text.label)
+            if let move = change.move {
+                Text(move)
+                    .foregroundStyle(DS.Text.secondary)
+            }
+        }
+        .font(DS.Font.caption)
+        .monospacedDigit()
+        .lineLimit(1)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(change.label) \(change.before) to \(change.after)\(change.move.map { ", \($0)" } ?? "")")
     }
 }
 
@@ -653,8 +760,9 @@ private struct SwingUncertainRow: View {
 /// sections. The Wheel card leads with open puts, collateral and cash, then
 /// each put as a row in the manner of the Dashboard's holdings that opens
 /// the option's page; "Buyback due" means the 15:45 ET monitor will buy that
-/// put back on its next pass. The scans show the latest three, the rest
-/// behind Show all. The screen runs the load.
+/// put back on its next pass. The Wheel card ends with "Run wheel now" (a
+/// manual scan that only makes review cards). The scans show the latest
+/// three, the rest behind Show all. The screen runs the loads and polls.
 struct WheelSections: View {
     let model: WheelModel
     /// The ids in the live pending queue.
@@ -670,6 +778,8 @@ struct WheelSections: View {
     static let scanPreview = 3
 
     @State private var showAllScans = false
+    /// "Run wheel now" is waiting on its confirmation.
+    @State private var confirmRun = false
 
     var body: some View {
         DSSection("Wheel", subtitle: subtitle) {
@@ -707,6 +817,15 @@ struct WheelSections: View {
                     }
                 }
             }
+            WheelRunRow(model: model) { confirmRun = true }
+                .confirmationDialog("Run wheel now?", isPresented: $confirmRun, titleVisibility: .visible) {
+                    Button("Run wheel now") {
+                        Task { await model.startRun() }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text(wheelRunConfirmMessage)
+                }
         }
         if let w = model.state.value {
             DSSection("Recent scans") {
@@ -780,6 +899,64 @@ struct WheelSections: View {
         } else {
             WheelScanRow(scan: scan, status: status, showsChevron: false)
         }
+    }
+}
+
+/// "Run wheel now": the wheel scan on demand, for today's session. It only
+/// makes review cards and never places an order. While a run is in
+/// progress the button rests and the phase and counts show; afterwards the
+/// last run's summary, or its error. The screen runs the poll.
+private struct WheelRunRow: View {
+    let model: WheelModel
+    let onRun: () -> Void
+
+    var body: some View {
+        let running = model.runInProgress
+        let busy = running || model.runStarting
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Manual run")
+                        .font(DS.Font.bodyMedium)
+                        .foregroundStyle(DS.Text.primary)
+                    Text("Scores today's candidates now. Places no orders")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Button("Run wheel now", action: onRun)
+                    .buttonStyle(.dsSecondary)
+                    .disabled(busy)
+            }
+            if busy {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(running ? (model.run?.run.map(wheelRunProgress) ?? "Starting the run…") : "Starting the run…")
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.secondary)
+                .monospacedDigit()
+            } else if let run = model.run?.run, !wheelRunSummary(run).isEmpty {
+                Text(wheelRunSummary(run))
+                    .font(DS.Font.caption)
+                    .foregroundStyle(run.status == "failed" ? DS.Palette.loss : DS.Text.secondary)
+                    .monospacedDigit()
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let error = model.runError {
+                Text(error)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Palette.loss)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if running, let readError = model.runReadError {
+                SwingNoteRow(text: "Last refresh failed: \(readError)")
+            }
+        }
+        .padding(.vertical, 8)
     }
 }
 

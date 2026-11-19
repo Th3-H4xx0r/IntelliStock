@@ -92,6 +92,25 @@ private struct InstanceDetailContent: View {
             .task(id: lanes.wheel) {
                 if lanes.wheel, wheel.state.value == nil { await wheel.load() }
             }
+            // The last manual wheel run, on open; a run in progress is
+            // re-read every 4 s until it ends or the screen goes.
+            .task(id: lanes.wheel) {
+                if lanes.wheel { await wheel.loadRun() }
+            }
+            .task(id: wheel.runInProgress) {
+                if wheel.runInProgress { await wheel.pollRun(lifecycle: services.lifecycle) }
+            }
+            // A finished run made cards: show them.
+            .onChange(of: wheel.runsFinished) {
+                Task {
+                    await signals.refresh()
+                    await wheel.load()
+                }
+            }
+            // A regrade in flight: the list every 4 s until it lands.
+            .task(id: signals.regradeLive) {
+                if signals.regradeLive { await signals.pollRegrades(lifecycle: services.lifecycle) }
+            }
             .task(id: account?.id) {
                 if let account { await services.instanceRows.refreshAccounts([account]) }
             }
@@ -265,7 +284,10 @@ private struct InstanceDetailContent: View {
             await model.refreshInstance()
             if let account { await services.instanceRows.refreshAccounts([account], force: true) }
             if lanes.any { await signals.build() }
-            if lanes.wheel { await wheel.load() }
+            if lanes.wheel {
+                await wheel.load()
+                await wheel.loadRun()
+            }
         }
     }
 

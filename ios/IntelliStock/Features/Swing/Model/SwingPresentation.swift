@@ -299,3 +299,206 @@ nonisolated func wheelErrorMessage(_ error: any Error) -> String {
     }
     return swingErrorText(error)
 }
+
+
+// MARK: - Wheel regrade (swing_trader/wheel_manual.py)
+
+/// A queued or running regrade older than this is dead (the server's
+/// `REGRADE_STALE_S`): shown as failed, and it can be asked for again.
+nonisolated let swingRegradeStaleAfter: TimeInterval = 300
+
+/// Where a card's latest regrade stands.
+nonisolated enum SwingRegradePhase: Hashable, Sendable {
+    /// Never regraded, or a status this build does not know.
+    case none
+    /// Queued or running, asked under `swingRegradeStaleAfter` ago.
+    case live
+    case done
+    case failed
+    /// Queued or running too long (or undated): treated as failed.
+    case stale
+}
+
+nonisolated func swingRegradePhase(_ s: SwingSignal, now: Date) -> SwingRegradePhase {
+    guard let r = s.regrade else { return .none }
+    switch r.status {
+    case "queued", "running":
+        guard let at = r.requestedAt else { return .stale }
+        return now.timeIntervalSince(at) < swingRegradeStaleAfter ? .live : .stale
+    case "done": return .done
+    case "failed": return .failed
+    default: return .none
+    }
+}
+
+/// The line under a live regrade.
+nonisolated let swingRegradeProgressText = "Regrading at today's prices…"
+
+/// New York, for "Scored Mon 16 Nov, 10:42 ET".
+nonisolated let swingNYCalendar: Calendar = {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "America/New_York")!
+    return calendar
+}()
+
+nonisolated private let swingWeekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+nonisolated private let swingMonths = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+/// "20 Nov" in `calendar`'s zone.
+nonisolated private func swingDayMonth(_ at: Date, _ calendar: Calendar) -> String {
+    let c = calendar.dateComponents([.month, .day], from: at)
+    return "\(c.day ?? 0) \(swingMonths[max(0, min(11, (c.month ?? 1) - 1))])"
+}
+
+/// "Mon 16 Nov, 10:42 ET".
+nonisolated private func swingNYStamp(_ at: Date, _ calendar: Calendar) -> String {
+    let c = calendar.dateComponents([.weekday, .hour, .minute], from: at)
+    let weekday = swingWeekdays[max(0, min(6, (c.weekday ?? 1) - 1))]
+    func two(_ v: Int) -> String { v < 10 ? "0\(v)" : "\(v)" }
+    return "\(weekday) \(swingDayMonth(at, calendar)), \(two(c.hour ?? 0)):\(two(c.minute ?? 0)) ET"
+}
+
+/// "Scored Mon 16 Nov, 10:42 ET · stock at $140.00": when the card's
+/// current score was made (`regrade.scored_at`, which a rescored regrade
+/// sets and every later block carries; else `created_at`), in New York, and
+/// the stock price it was made at.
+nonisolated func swingScoredAtText(_ s: SwingSignal, calendar: Calendar = swingNYCalendar) -> String {
+    let at = s.regrade?.scoredAt ?? DartDateTime.tryParse(s.createdAt)
+    let when = at.map { "Scored \(swingNYStamp($0, calendar))" } ?? "Score time unknown"
+    guard let price = s.stockPrice else { return when }
+    return "\(when) · stock at \(fmtMoney(price))"
+}
+
+/// One before → after line of a rescored regrade.
+nonisolated struct SwingRegradeChange: Hashable, Sendable {
+    let label: String
+    let before: String
+    let after: String
+    /// The percent move, for the stock price.
+    let move: String?
+}
+
+/// A finished, rescored regrade's before → after lines: score, stock price
+/// (with its move), strike and premium. Empty otherwise: a regrade that did
+/// not rescore changed nothing on the card.
+nonisolated func swingRegradeChanges(_ s: SwingSignal) -> [SwingRegradeChange] {
+    guard let r = s.regrade, r.status == "done", r.rescored == true else { return [] }
+    let p = r.previous
+    func score(_ v: Int?) -> String { v.map(String.init) ?? "—" }
+    return [
+        SwingRegradeChange(label: "Score", before: score(p?.score), after: score(s.score), move: nil),
+        SwingRegradeChange(
+            label: "Stock", before: fmtMoney(p?.stockPrice), after: fmtMoney(s.stockPrice),
+            move: swingPctMove(p?.stockPrice, s.stockPrice)
+        ),
+        SwingRegradeChange(label: "Strike", before: fmtMoney(p?.strike), after: fmtMoney(s.strike), move: nil),
+        SwingRegradeChange(label: "Premium", before: fmtMoney(p?.premiumEst), after: fmtMoney(s.premiumEst), move: nil),
+    ]
+}
+
+/// "+8.0%" / "-3.2%" / "0.0%" from `before` to `after`; nil without both
+/// or from a price at or below zero.
+nonisolated func swingPctMove(_ before: Double?, _ after: Double?) -> String? {
+    guard let before, let after, before > 0 else { return nil }
+    let pct = (after - before) / before * 100
+    let text = dartToStringAsFixed(abs(pct), 1)
+    if text == "0.0" { return "0.0%" }
+    return "\(pct > 0 ? "+" : "-")\(text)%"
+}
+
+/// The card's warnings, in order: "No longer qualifies" whenever
+/// `qualifies` is false (later requests and failures carry it until a done
+/// regrade overwrites it), then a failed regrade or one that never finished.
+/// The card, its old values and Approve / Reject all stay.
+nonisolated func swingRegradeWarnings(_ s: SwingSignal, now: Date) -> [String] {
+    guard let r = s.regrade else { return [] }
+    var out: [String] = []
+    if r.qualifies == false {
+        out.append(r.reason.isEmpty ? "No longer qualifies" : "No longer qualifies: \(r.reason)")
+    }
+    switch swingRegradePhase(s, now: now) {
+    case .failed:
+        out.append(r.error.isEmpty ? "Regrade failed" : "Regrade failed: \(r.error)")
+    case .stale:
+        out.append("Regrade failed: the instance did not finish it within 5 minutes. You can regrade again")
+    case .none, .live, .done:
+        break
+    }
+    return out
+}
+
+/// The `expect_regrade_count` an approval sends: the regrade count (0 when
+/// never regraded) of the wheel card the operator is looking at, so the
+/// server can refuse (412) an approval of terms that have since changed. nil
+/// for a rejection or a swing card.
+nonisolated func swingExpectRegradeCount(_ s: SwingSignal, _ decision: String) -> Int? {
+    guard s.isWheel, decision == "approve" || decision == "approve_half" else { return nil }
+    return s.regrade?.count ?? 0
+}
+
+/// A failed regrade or run request in plain words: 409 `alreadyUnderWay`,
+/// 503 "The instance is not running" and the server's detail, anything
+/// else the detail itself.
+nonisolated func swingActionErrorText(_ error: any Error, alreadyUnderWay: String) -> String {
+    guard let api = error as? ApiError else { return swingErrorText(error) }
+    let detail = api.message.trimmingCharacters(in: .whitespacesAndNewlines)
+    switch api.statusCode {
+    case 409:
+        return alreadyUnderWay
+    case 503:
+        return detail.isEmpty ? "The instance is not running" : "The instance is not running: \(detail)"
+    default:
+        if !detail.isEmpty { return detail }
+        return api.statusCode.map { "The server responded with status \($0)." } ?? "Something went wrong."
+    }
+}
+
+// MARK: - Manual wheel run
+
+/// The "Run wheel now" confirmation: it costs one AI call per candidate and
+/// only ever makes review cards.
+nonisolated let wheelRunConfirmMessage = "Scores today's wheel candidates with the AI, one call per candidate. "
+    + "Places no orders: new picks wait here as cards for your review."
+
+nonisolated private func wheelCards(_ n: Int) -> String { n == 1 ? "1 new card" : "\(n) new cards" }
+
+/// What a run in progress is doing, by phase, with its counts.
+nonisolated func wheelRunProgress(_ run: WheelRun) -> String {
+    switch run.phase {
+    case "queued":
+        return "Waiting for the instance to start the run…"
+    case "screening":
+        return "Screening the wheel universe…"
+    case "earnings":
+        return "Checking earnings dates · \(run.passedScreen) of \(run.scanned) passed the screen"
+    case "scoring":
+        let found = run.newPending > 0 ? "\(wheelCards(run.newPending)) so far" : "no new cards yet"
+        return "Scoring \(run.scored) of \(run.toScore) · \(found)"
+    default:
+        return "Starting the run…"
+    }
+}
+
+/// The last run, once the server says it is not in progress: its counts,
+/// its error, or that it stopped before it finished. "" without a status.
+nonisolated func wheelRunSummary(_ run: WheelRun, calendar: Calendar = swingNYCalendar) -> String {
+    let day: String = {
+        let parts = run.session.split(separator: "-").compactMap { Int($0) }
+        if parts.count == 3, (1...12).contains(parts[1]) { return "\(parts[2]) \(swingMonths[parts[1] - 1])" }
+        return run.startedAt.map { swingDayMonth($0, calendar) } ?? ""
+    }()
+    let label = day.isEmpty ? "Manual run" : "Manual run \(day)"
+    switch run.status {
+    case "done":
+        let errors = run.errors == 1 ? "1 error" : "\(run.errors) errors"
+        return "\(label): scanned \(run.scanned), passed screen \(run.passedScreen), scored \(run.scored), "
+            + "\(wheelCards(run.newPending)), \(run.rejected) rejected, "
+            + "\(run.skippedExisting) already had a card, \(errors)"
+    case "failed":
+        return run.error.isEmpty ? "\(label) failed" : "\(label) failed: \(run.error)"
+    case "running":
+        return "\(label) stopped before it finished. You can run it again"
+    default:
+        return ""
+    }
+}

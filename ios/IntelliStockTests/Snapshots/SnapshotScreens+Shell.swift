@@ -100,7 +100,7 @@ struct SnapshotScreensShell {
         SwingOrderReview(
             signal: SwingSignal(json: json),
             decision: decision,
-            send: { DecisionResult(.recorded, "Snapshot: nothing was sent.") },
+            send: { _ in DecisionResult(.recorded, "Snapshot: nothing was sent.") },
             finished: { _ in }
         )
     }

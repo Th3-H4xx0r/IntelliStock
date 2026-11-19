@@ -37,6 +37,8 @@ nonisolated class SwingFakeSource: SwingSignalsSource, @unchecked Sendable {
     var approved: [SwingSignal]
     var wheelSnapshot: WheelSnapshot
     var decideCalls: [String] = []
+    /// The `expect_regrade_count` each decide() carried, in order.
+    var decideExpectCounts: [Int?] = []
     var resendCalls: [String] = []
     var decideError: (any Error)?
     var resendError: (any Error)?
@@ -67,6 +69,25 @@ nonisolated class SwingFakeSource: SwingSignalsSource, @unchecked Sendable {
     var recent: [SwingSignal] = []
     var recentError: (any Error)?
     var recentCalls = 0
+    var pendingCalls = 0
+    /// POST .../regrade: the calls, the answer (nil answers the bare id),
+    /// an error, and a gate that holds the answer.
+    var regradeCalls: [String] = []
+    var regradeAnswer: SwingSignal?
+    var regradeError: (any Error)?
+    var regradeGate: SwingTestGate?
+    /// GET .../wheel/scan answers these in order; the last one repeats.
+    var runStatuses: [WheelRunStatus] = [WheelRunStatus()]
+    var runStatusError: (any Error)?
+    var runStatusCalls = 0
+    /// Holds the next status read only; its answer is the one current when
+    /// the read was sent.
+    var runStatusGate: SwingTestGate?
+    /// POST .../wheel/scan.
+    var startRunAnswer = WheelRunStatus()
+    var startRunError: (any Error)?
+    var startRunGate: SwingTestGate?
+    var startRunCalls = 0
 
     init(_ pending: [SwingSignal], wheelSnapshot: WheelSnapshot = .empty, approved: [SwingSignal] = []) {
         self.pending = pending
@@ -75,13 +96,15 @@ nonisolated class SwingFakeSource: SwingSignalsSource, @unchecked Sendable {
     }
 
     func pendingSignals(_ instanceId: String) async throws -> [SwingSignal] {
+        pendingCalls += 1
         if let pendingError { throw pendingError }
         if let listError { throw listError }
         return pending
     }
 
-    func decide(_ instanceId: String, _ signalId: String, _ decision: String, reason: String?) async throws -> DecisionReceipt {
+    func decide(_ instanceId: String, _ signalId: String, _ decision: String, reason: String?, expectRegradeCount: Int?) async throws -> DecisionReceipt {
         decideCalls.append("\(signalId):\(decision)")
+        decideExpectCounts.append(expectRegradeCount)
         if let gate { await gate.wait() }
         if let decideError { throw decideError }
         return decideReceipt
@@ -130,6 +153,31 @@ nonisolated class SwingFakeSource: SwingSignalsSource, @unchecked Sendable {
         recentCalls += 1
         if let recentError { throw recentError }
         return recent
+    }
+
+    func regradeSignal(_ instanceId: String, _ signalId: String) async throws -> SwingSignal {
+        regradeCalls.append(signalId)
+        if let regradeGate { await regradeGate.wait() }
+        if let regradeError { throw regradeError }
+        return regradeAnswer ?? SwingSignal(json: ["id": .string(signalId)])
+    }
+
+    func startWheelRun(_ instanceId: String) async throws -> WheelRunStatus {
+        startRunCalls += 1
+        if let startRunGate { await startRunGate.wait() }
+        if let startRunError { throw startRunError }
+        return startRunAnswer
+    }
+
+    func wheelRunStatus(_ instanceId: String) async throws -> WheelRunStatus {
+        runStatusCalls += 1
+        if let runStatusError { throw runStatusError }
+        let answer = runStatuses.count > 1 ? runStatuses.removeFirst() : (runStatuses.first ?? WheelRunStatus())
+        if let gate = runStatusGate {
+            runStatusGate = nil
+            await gate.wait()
+        }
+        return answer
     }
 }
 
@@ -275,6 +323,52 @@ func withTestStatus(_ s: SwingSignal, _ status: String, orderClientId: String? =
     if let at = s.decidedAt { json["decided_at"] = .string(ISO8601DateFormatter().string(from: at)) }
     if let orderClientId { json["order_client_id"] = .string(orderClientId) }
     return SwingSignal(json: .object(json))
+}
+
+/// A pending APH wheel card as the list returns it (created Mon 16 Nov,
+/// 10:42 ET), with `regrade` and `source` when given.
+func regradeTestSignal(
+    _ id: String = "w1",
+    regrade: JSON? = nil,
+    source: JSON? = nil,
+    createdAt: String = "2026-11-16T15:42:00.123456+00:00",
+    score: Int = 55,
+    stock: Double? = 140,
+    strike: Double = 130,
+    premium: Double = 1.3
+) -> SwingSignal {
+    var json: JSONObject = [
+        "id": .string(id),
+        "lane": "wheel",
+        "symbol": "APH",
+        "session": "2026-11-16",
+        "created_at": .string(createdAt),
+        "score": JSON(score),
+        "recommendation": "REVIEW",
+        "reasoning": "IV rank is high.",
+        "key_risks": [],
+        "proposal": [
+            "contract": nil, "strike": JSON(strike), "expiry": "2026-11-20", "qty": 1,
+            "limit_price": nil, "premium_est": JSON(premium),
+        ],
+        "context": ["stock_price": JSON(stock), "otm_pct": 7.1],
+        "status": "pending",
+    ]
+    if let regrade { json["regrade"] = regrade }
+    if let source { json["source"] = source }
+    return SwingSignal(json: .object(json))
+}
+
+/// A manual wheel run as GET/POST .../wheel/scan answers it.
+func wheelRunTestStatus(_ phase: String, inProgress: Bool, status: String = "running", _ fields: JSONObject = [:]) -> WheelRunStatus {
+    var run: JSONObject = [
+        "id": "r1", "status": .string(status), "phase": .string(phase), "requested_by": "pranav",
+        "started_at": "2026-11-20T15:00:00+00:00", "heartbeat_at": "2026-11-20T15:00:00+00:00",
+        "finished_at": nil, "session": "2026-11-20", "scanned": 0, "passed_screen": 0, "to_score": 0,
+        "scored": 0, "new_pending": 0, "rejected": 0, "skipped_existing": 0, "errors": 0, "error": nil,
+    ]
+    for (key, value) in fields { run[key] = value }
+    return WheelRunStatus(json: ["run": .object(run), "in_progress": .bool(inProgress)])
 }
 
 func wheelTestSignal(_ id: String) -> SwingSignal {
