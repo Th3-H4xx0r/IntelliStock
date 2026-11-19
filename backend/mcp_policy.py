@@ -21,7 +21,7 @@ import json
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 POLICY_CLASSES = ("read", "write", "money", "irreversible", "never")
@@ -117,7 +117,7 @@ def _env_cidr(env: Mapping[str, str], name: str,
 @dataclass(frozen=True)
 class McpConfig:
     enabled: bool
-    service_token: str | None
+    service_token: str | None = field(repr=False)  # a secret: never in a repr or a log line
     port: int
     allowed_cidr: ipaddress.IPv4Network | ipaddress.IPv6Network | None
     protected_instances: frozenset[str]
