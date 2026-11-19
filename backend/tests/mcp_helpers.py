@@ -6,8 +6,22 @@ from __future__ import annotations
 
 import importlib
 import os
+import uuid
+from datetime import datetime, timezone
+
+from mcp_policy import McpConfig
 
 MCP_TOKEN = "t" * 40
+
+# Socket peers inside and outside the default MCP_ALLOWED_CIDR (172.31.250.0/24).
+PEER_IN = "172.31.250.7"
+PEER_OUT = "10.9.9.9"
+
+# Shared constants. Time-dependent tests monkeypatch mcp_policy.utc_now (and the
+# modules that import it) to return T0 + delta.
+T0 = datetime(2026, 11, 19, 15, 0, tzinfo=timezone.utc)
+CFG = McpConfig.from_env({})
+PRINCIPAL = {"id": "u-op", "username": "operator", "via": "mcp", "client": "jarvis"}
 
 # Every module that binds `store` at module level and that an MCP test reads
 # through. use_store skips the ones a later task has not written yet.
@@ -78,3 +92,97 @@ def seed_money_fixture(store) -> None:
     ])
     store.insert("Strategies", [{"id": sid, "name": f"strategy {sid}"}
                                 for sid in (200, 201, 202, 204, 205, 207, 299)])
+
+
+def seed_operator(store) -> None:
+    """The one human account the MCP tests act as."""
+    store.insert("Users", {"id": "u-op", "username": "operator", "password_hash": "x", "token_version": 0})
+
+
+def human_token(monkeypatch, user_id: str = "u-op", username: str = "operator") -> str:
+    """A human JWT for user_id; JWT_SECRET is set for the test."""
+    import auth_utils
+
+    monkeypatch.setenv("JWT_SECRET", "j" * 40)
+    return auth_utils.create_access_token(user_id, username, 0)
+
+
+def human_headers(monkeypatch) -> dict:
+    """Authorization for the operator's human session; tests bind it to HUMAN."""
+    return {"Authorization": f"Bearer {human_token(monkeypatch)}"}
+
+
+def IDEM() -> dict:  # noqa: N802 - reads as a constant at the call site: headers=IDEM()
+    """A fresh Idempotency-Key header."""
+    return {"Idempotency-Key": uuid.uuid4().hex}
+
+
+def mcp_client(app, *, peer: str = PEER_IN, acting_user: str | None = "u-op",
+               client: str | None = "jarvis", token: str | None = MCP_TOKEN):
+    """A TestClient on the MCP listener (:8012) from socket peer 'peer'.
+
+    Sends what the MCP server sends on every call; a header whose argument is
+    None is omitted.
+    """
+    from fastapi.testclient import TestClient
+
+    headers = {
+        "Authorization": None if token is None else f"Bearer {token}",
+        "X-MCP-Acting-User": acting_user,
+        "X-MCP-Client": client,
+        "X-MCP-Correlation-Id": str(uuid.uuid4()),
+    }
+    return TestClient(app, base_url="http://api:8012", client=(peer, 40000),
+                      headers={k: v for k, v in headers.items() if v is not None})
+
+
+def public_client(app):
+    """A TestClient on the public listener (:8011)."""
+    from fastapi.testclient import TestClient
+
+    return TestClient(app, base_url="http://api:8011")
+
+
+def make_probe_app():
+    """A small app behind McpGateMiddleware whose routes depend on main.get_current_user.
+
+    Returns (app, calls). Each route counts its calls in calls["count"][operation_id]
+    and records the body it received (calls["body"]) and its principal
+    (calls["principal"]). Later tasks add routes here.
+    """
+    from fastapi import Body, Depends, FastAPI
+
+    from api import main
+    from api.mcp_gate import McpGateMiddleware
+    from mcp_policy import mcp_policy
+
+    app = FastAPI()
+    app.add_middleware(McpGateMiddleware)
+    calls: dict = {"count": {}, "body": None, "principal": None}
+
+    def hit(operation_id: str, user: dict, body: object = None) -> None:
+        calls["count"][operation_id] = calls["count"].get(operation_id, 0) + 1
+        calls["principal"] = user
+        calls["body"] = body
+
+    @app.get("/whoami", operation_id="whoami", openapi_extra=mcp_policy("read"))
+    def whoami(user: dict = Depends(main.get_current_user)):
+        hit("whoami", user)
+        return user
+
+    @app.get("/probe/read", operation_id="probe_read", openapi_extra=mcp_policy("read"))
+    def probe_read(user: dict = Depends(main.get_current_user)):
+        hit("probe_read", user)
+        return {"ok": True}
+
+    @app.post("/probe/never", operation_id="probe_never", openapi_extra=mcp_policy("never"))
+    def probe_never(body: dict = Body(default=None), user: dict = Depends(main.get_current_user)):
+        hit("probe_never", user, body)
+        return {"ok": True}
+
+    @app.get("/probe/unannotated", operation_id="probe_unannotated")
+    def probe_unannotated(user: dict = Depends(main.get_current_user)):
+        hit("probe_unannotated", user)
+        return {"ok": True}
+
+    return app, calls

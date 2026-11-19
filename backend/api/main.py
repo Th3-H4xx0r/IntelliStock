@@ -71,6 +71,7 @@ from stock_credential_boundary import StockCredentialError
 # than live_readiness -- the Docker import is inside the call.
 from deployed_artifact import deployed_artifact_digest
 from mcp_policy import mcp_policy
+from api import mcp_gate
 from interactive_utils import (
     get_conn,
     InstanceExistsError,
@@ -250,6 +251,10 @@ if _cors_origins:
         allow_headers=["Authorization", "Content-Type"],
         expose_headers=["X-Refreshed-Token"],
     )
+
+# The MCP gate (contract §2). On the public listener it hands every request to
+# the app untouched; on the MCP listener (MCP_API_PORT) it is the whole gate.
+app.add_middleware(mcp_gate.McpGateMiddleware)
 
 security = HTTPBearer(auto_error=True)
 
@@ -433,8 +438,14 @@ def get_current_user(
     response: Response,
     credentials: HTTPAuthorizationCredentials = Depends(security),
     conn=Depends(conn_dependency),
+    request: Request = None,
 ) -> dict:
     """Validate JWT and return current user dict (id, username). Raises 401 if invalid."""
+    # A call the MCP gate admitted on its own listener: the principal it put in
+    # the scope (contract §2). Only in-process code can set that scope key.
+    principal = mcp_gate.principal_from_scope(request.scope) if request is not None else None
+    if principal is not None:
+        return principal
     token = credentials.credentials
     payload = decode_access_token(token)
     if not payload:
