@@ -12,7 +12,14 @@
      request is byte-for-byte what the inline confirm step sent. While that
      request is in flight both buttons are disabled; a refusal shows here and
      the confirm can be pressed again; a recorded approval shows the sent
-     mark and closes, as on iOS. -->
+     mark and closes, as on iOS.
+
+     A wheel put also says when its score was made and carries the card's
+     regrade warning (no longer qualifies / regrade failed), as the card does.
+     A regrade that lands while the review is open (`drift`) shows a
+     "Regraded while open" notice with the before -> after of the terms and a
+     "Use new terms" button; until it is pressed, Confirm sends the terms the
+     operator opened and the server refuses them (412). -->
 <template>
   <Teleport to="body">
     <div
@@ -65,7 +72,35 @@
           </div>
 
           <div class="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-6">
+            <div v-if="drift" class="rounded-lg border border-white/[0.08] bg-raised px-4 py-3" role="status">
+              <p class="flex items-center gap-2 text-sm font-medium text-slate-100">
+                <span class="ui-dot ui-dot-warn"></span>
+                Regraded while open
+              </p>
+              <p v-if="drift.rows.length" class="text-xs text-slate-400 mt-2 tabular-nums leading-relaxed">
+                <template v-for="(c, i) in drift.rows" :key="c.label">
+                  <span v-if="i" class="text-slate-600" aria-hidden="true"> · </span>
+                  <span class="whitespace-nowrap">
+                    {{ c.label }} {{ c.before }} → <span class="text-slate-200">{{ c.after }}</span><span v-if="c.move" class="text-slate-500"> ({{ c.move }})</span>
+                  </span>
+                </template>
+              </p>
+              <p v-else class="text-xs text-slate-400 mt-2">The terms below did not change.</p>
+              <p class="text-sm text-slate-300 mt-2 leading-relaxed">
+                The terms below are the new ones. Approving now sends the terms you opened, which the server refuses; check the new terms, then use them.
+              </p>
+              <button type="button" class="ui-btn mt-3" :disabled="busy" @click="emit('accept-terms')">Use new terms</button>
+            </div>
+
             <p v-if="plan" class="text-sm text-slate-300 leading-relaxed">{{ plan.summary }} {{ plan.assignment }}</p>
+
+            <div v-if="wheel" class="space-y-2">
+              <p class="text-xs text-slate-500 tabular-nums">{{ scoredLine }}</p>
+              <p v-for="w in regradeNotes" :key="w" class="flex items-start gap-2 text-sm text-slate-300 leading-relaxed">
+                <span class="ui-dot ui-dot-warn mt-2"></span>
+                <span class="break-words">{{ w }}</span>
+              </p>
+            </div>
 
             <SwingOrderChart
               :symbol="signal.symbol"
@@ -176,7 +211,7 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import SwingOrderChart from './SwingOrderChart.vue'
-import { confirmPrompt } from '../../utils/swing.js'
+import { confirmPrompt, regradeWarnings, scoredAtLabel } from '../../utils/swing.js'
 import {
   collateralWarning, isWheel, putPlan, reviewConfirmLabel, reviewDetails, reviewFigures, reviewSideLabel,
 } from '../../utils/swingReview.js'
@@ -195,8 +230,10 @@ const props = defineProps({
   result: { type: Object, default: null },
   /** The last refusal, shown above the footer; the confirm stays available. */
   error: { type: String, default: '' },
+  /** reviewDrift(): a regrade landed since the review opened; null otherwise. */
+  drift: { type: Object, default: null },
 })
-const emit = defineEmits(['cancel', 'confirm', 'close', 'update:reason'])
+const emit = defineEmits(['cancel', 'confirm', 'close', 'update:reason', 'accept-terms'])
 
 const uid = Math.random().toString(36).slice(2, 8)
 const titleId = `swing-review-title-${uid}`
@@ -207,7 +244,10 @@ const plan = computed(() => putPlan(props.signal))
 const figures = computed(() => reviewFigures(props.signal))
 const details = computed(() => reviewDetails(props.signal))
 const sideLabel = computed(() => reviewSideLabel(props.signal))
-const laneLabel = computed(() => (isWheel(props.signal) ? 'Wheel' : 'Swing'))
+const wheel = computed(() => isWheel(props.signal))
+const laneLabel = computed(() => (wheel.value ? 'Wheel' : 'Swing'))
+const scoredLine = computed(() => scoredAtLabel(props.signal))
+const regradeNotes = computed(() => regradeWarnings(props.signal, Date.now()))
 const confirmLabel = computed(() => reviewConfirmLabel(props.signal, props.decision))
 const caveat = computed(() => confirmPrompt(props.signal, props.decision))
 const warning = computed(() => collateralWarning(props.signal, props.cash))

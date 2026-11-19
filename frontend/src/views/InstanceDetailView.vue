@@ -39,10 +39,12 @@ const swingLanes = computed(() => swingLanesOf(inst.value?.strategy))
 // Shared between the two swing cards (iOS InstanceDetailView passes the same):
 // the pending queue's ids tell the wheel's scan rows which can jump to a
 // card; a decision makes the wheel re-read its signal links; the wheel's
-// cash feeds the order review's collateral warning.
+// cash feeds the order review's collateral warning. A manual wheel run that
+// ends makes the pending card re-read its list for the run's new cards.
 const swingPendingIds = ref([])
 const swingDecisions  = ref(0)
 const wheelCash       = ref(null)
+const wheelRunsDone   = ref(0)
 
 const API_BASE = import.meta.env.DEV
   ? '/api'
@@ -1683,6 +1685,7 @@ async function submitCreateBacktest() {
             :instance-id="instanceId"
             :api-base="API_BASE"
             :cash="wheelCash"
+            :refresh-key="wheelRunsDone"
             @pending-ids="swingPendingIds = $event"
             @decided="swingDecisions++"
           />
@@ -1693,6 +1696,7 @@ async function submitCreateBacktest() {
             :pending-ids="swingPendingIds"
             :refresh-key="swingDecisions"
             @cash="wheelCash = $event"
+            @run-finished="wheelRunsDone++"
           />
         </div>
 

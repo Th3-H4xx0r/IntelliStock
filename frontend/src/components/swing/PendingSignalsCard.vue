@@ -33,7 +33,21 @@
      the card until the operator dismisses it. One that still finds it approved more
      than 2 minutes after the 202 moves it to "Approved, not yet sent", with
      Re-send and Dismiss; a waiting card offers Dismiss after 2 minutes in
-     any case (round 3 FU-1). -->
+     any case (round 3 FU-1).
+
+     A pending wheel card has a Regrade button: POST .../regrade re-scores it
+     at today's prices on the instance, and the result lands on the row about
+     a minute later. While any card's regrade is live (queued or running, not
+     past the 5-minute stale mark) the list is re-read every 4 s. A regrade
+     never changes the card's status: one that no longer qualifies, or failed,
+     shows a warning and Approve / Reject stay. Each wheel card says when its
+     score was made, and a done + rescored regrade shows before -> after.
+     A wheel approval sends the regrade.count of the terms the operator
+     reviewed (the row shown when the review opened). A regrade that lands
+     while the review is open shows a "Regraded while open" notice with the
+     before -> after and a "Use new terms" button; confirming without it gets
+     the server's 412, which keeps the card and the review open with the
+     server's message, re-reads, and makes the new terms the reviewed ones. -->
 <template>
   <section class="min-w-0" aria-labelledby="pending-signals-title">
     <div class="flex items-center justify-between gap-3 min-h-8 mb-3">
@@ -94,12 +108,17 @@
             <span class="text-sm font-medium text-slate-100">{{ s.symbol }}</span>
             <span class="text-xs text-slate-400 capitalize">{{ s.lane }}</span>
             <span
+              v-if="s.source === 'manual_scan'"
+              class="text-xs text-slate-400 rounded border border-white/[0.08] px-1.5"
+              title="Made by a manual wheel run"
+            >Manual run</span>
+            <span
               class="text-xs tabular-nums"
               :class="scoreClass(s.score)"
               :title="s.recommendation || ''"
             >Score {{ s.score ?? '—' }}</span>
             <span class="text-xs text-slate-500 tabular-nums">
-              Session {{ s.session || '—' }} · {{ fmtWhen(s.created_at) }}
+              Session {{ s.session || '—' }} · {{ s.lane === 'wheel' ? regradeById[s.id].scored : fmtWhen(s.created_at) }}
             </span>
           </div>
 
@@ -113,6 +132,27 @@
               >{{ row.value }}</div>
             </div>
           </div>
+
+          <p v-if="regradeById[s.id].changes" class="text-xs text-slate-400 mt-3 tabular-nums max-w-3xl">
+            <span class="text-slate-500">Regraded:</span>
+            <template v-for="(c, i) in regradeById[s.id].changes" :key="c.label">
+              <span v-if="i" class="text-slate-600" aria-hidden="true"> · </span>
+              <span class="whitespace-nowrap">
+                {{ c.label }} {{ c.before }} → <span class="text-slate-200">{{ c.after }}</span><span v-if="c.move" class="text-slate-500"> ({{ c.move }})</span>
+              </span>
+            </template>
+          </p>
+          <p
+            v-for="w in regradeById[s.id].warnings"
+            :key="w"
+            class="flex items-start gap-2 text-sm text-slate-300 mt-3 max-w-3xl"
+          >
+            <span class="ui-dot ui-dot-warn mt-2"></span>
+            <span class="break-words">{{ w }}</span>
+          </p>
+          <p v-if="regradeErrors[s.id]" class="text-sm text-loss mt-2 break-words max-w-3xl" role="alert">
+            {{ regradeErrors[s.id] }}
+          </p>
 
           <p v-if="s.reasoning" class="text-sm text-slate-300 mt-3 leading-relaxed whitespace-pre-line break-words max-w-3xl">
             {{ expanded[s.id] ? String(s.reasoning).trim() : reasoningPreview(s.reasoning).text }}
@@ -162,6 +202,20 @@
               :disabled="!!deciding[s.id]"
               class="ui-btn"
             >{{ DECISION_LABELS[d] }}</button>
+            <button
+              v-if="regradeById[s.id].control.show"
+              @click="regrade(s)"
+              :disabled="regradeById[s.id].control.disabled || !!regrading[s.id]"
+              class="ui-btn-ghost inline-flex items-center gap-1.5 disabled:opacity-60"
+              title="Re-score this put at today's prices (about a minute). The card stays pending."
+            >
+              <span
+                v-if="regradeById[s.id].control.disabled || regrading[s.id]"
+                class="material-symbols-outlined text-[16px] animate-spin"
+                aria-hidden="true"
+              >progress_activity</span>
+              {{ regrading[s.id] ? 'Regrading…' : regradeById[s.id].control.label }}
+            </button>
           </div>
         </div>
       </div>
@@ -267,7 +321,7 @@
     <!-- Order review: Approve / Approve ½ open it; its confirm calls submit(). -->
     <SwingOrderReviewModal
       v-if="review"
-      :signal="review.signal"
+      :signal="reviewSignal"
       :decision="review.decision"
       :api-base="apiBase"
       :cash="cash"
@@ -275,6 +329,8 @@
       :busy="reviewBusy"
       :result="shownReviewResult"
       :error="reviewError"
+      :drift="reviewDriftView"
+      @accept-terms="acceptReviewTerms"
       @update:reason="reasons[review.signal.id] = $event"
       @cancel="cancelReview"
       @confirm="confirmReview"
@@ -296,19 +352,29 @@ import {
   confirmPrompt,
   createDecisionLatch,
   createInFlightGuard,
+  decisionBody,
   decisionsFor,
   detailText,
   joinKeyRisks,
   addUncertain,
+  anyRegradeLive,
+  applyLocalRegrades,
   cardSections,
+  classifyRegradeFailure,
   createStuckMemory,
   foldSignalLoad,
   nyDate,
   proposalRows,
+  pruneRegradeErrors,
   reasoningPreview,
+  regradeChanges,
+  regradeControl,
+  regradeWarnings,
   resendBlockedReason,
+  reviewDrift,
   resendPrompt,
   resendSuccess,
+  scoredAtLabel,
   scoreTone,
   stuckLabel,
   uncertainBadge,
@@ -318,12 +384,16 @@ import {
 } from '../../utils/swing.js'
 
 const POLL_MS = 30000
+// While a card's regrade is live (it takes about a minute).
+const REGRADE_POLL_MS = 4000
 
 const props = defineProps({
   instanceId: { type: String, required: true },
   apiBase: { type: String, required: true },
   /** The wheel account's cash (from the wheel panel), for the review's collateral warning. */
   cash: { type: Number, default: null },
+  /** Bumped when a manual wheel run finishes: re-read the list for its new cards. */
+  refreshKey: { type: Number, default: 0 },
 })
 // pending-ids: the live pending queue, for the wheel's scan rows.
 // decided: a decision request settled (the wheel re-reads its signal links).
@@ -355,6 +425,22 @@ const sections = computed(() => cardSections({
 }))
 let pollTimer = null
 let noticeTimer = null
+
+// -- Regrade (wheel cards) -----------------------------------------------------
+const regrading = ref({})        // signal id -> true while the POST .../regrade is in flight
+const regradeErrors = ref({})    // signal id -> why the last regrade request was refused
+const regradeGuard = createInFlightGuard()
+let localRegrades = {}           // signal id -> the queued block a POST returned (applyLocalRegrades)
+let regradeTimer = null
+let reloadQueued = false
+let disposed = false
+// Each card's regrade bits, from the clock the list was last read at.
+const regradeById = computed(() => Object.fromEntries(signals.value.map(s => [s.id, {
+  control: regradeControl(s, nowMs.value),
+  scored: scoredAtLabel(s),
+  changes: regradeChanges(s),
+  warnings: regradeWarnings(s, nowMs.value),
+}])))
 
 function authHeaders() {
   const token = getToken()
@@ -419,6 +505,7 @@ function removeCard(id) {
   signals.value = signals.value.filter(s => s.id !== id)
   confirming.value = omit(confirming.value, id)
   reasons.value = omit(reasons.value, id)
+  regradeErrors.value = omit(regradeErrors.value, id)
 }
 
 async function fetchSignals(status) {
@@ -438,6 +525,7 @@ async function load() {
   if (loading.value) return
   loading.value = true
   const generation = latch.beginLoad()
+  const instanceAtStart = props.instanceId
   try {
     // The approved lists feed the "Approved, not yet sent" cards, and they
     // end the hide on a card this page decided (FW-api-I2). Each read settles
@@ -445,6 +533,9 @@ async function load() {
     const statuses = ['pending', 'approved', 'approved_half']
     if (uncertainListsNeeded(uncertain.value)) statuses.push('submitted', 'failed')
     const settled = await Promise.allSettled(statuses.map(fetchSignals))
+    // The instance changed while this read was out: its rows are another
+    // instance's. The watcher queued a fresh load (refresh), run in finally.
+    if (disposed || props.instanceId !== instanceAtStart) return
     const results = Object.fromEntries(statuses.map((status, i) => [status, settled[i]]))
     nowMs.value = Date.now()
     const out = foldSignalLoad({
@@ -457,11 +548,19 @@ async function load() {
     for (const id of Object.keys(confirming.value)) {
       if (!live.has(id) && !deciding.value[id]) confirming.value = omit(confirming.value, id)
     }
+    // A poll that was in flight when a regrade POST answered can predate it.
+    const merged = applyLocalRegrades(out.signals, localRegrades)
+    localRegrades = merged.local
+    // A refused-regrade message goes once its card left, or the card's
+    // regrade moved on (another device's regrade started or finished).
+    const keptErrors = pruneRegradeErrors(regradeErrors.value, signals.value, merged.rows)
+    if (Object.keys(keptErrors).length !== Object.keys(regradeErrors.value).length) regradeErrors.value = keptErrors
     const stuckIds = new Set(out.stuck.map(s => s.id))
     for (const id of Object.keys(resendConfirming.value)) {
       if (!stuckIds.has(id) && !resending.value[id]) resendConfirming.value = omit(resendConfirming.value, id)
     }
-    signals.value = out.signals
+    signals.value = merged.rows
+    adoptReviewedAfter412(generation)
     stuck.value = out.stuck
     uncertain.value = out.uncertain
     stuckMemory.joined = out.joined
@@ -470,6 +569,78 @@ async function load() {
     if (out.pendingLoaded) loaded.value = true
   } finally {
     loading.value = false
+    syncRegradePoll()
+    if (reloadQueued && !disposed) {
+      reloadQueued = false
+      load()
+    }
+  }
+}
+
+/** load(), or once more after the load in flight (whose answer may predate the reason). */
+function refresh() {
+  if (disposed) return
+  if (loading.value) {
+    reloadQueued = true
+    return
+  }
+  load()
+}
+
+// The 4 s re-read runs only beside the regular poll (so a 401 or leaving the
+// page stops it) and only while some card's regrade is live.
+function syncRegradePoll() {
+  const want = pollTimer !== null && anyRegradeLive(signals.value, Date.now())
+  if (want && !regradeTimer) {
+    regradeTimer = setInterval(load, REGRADE_POLL_MS)
+  } else if (!want && regradeTimer) {
+    clearInterval(regradeTimer)
+    regradeTimer = null
+  }
+}
+
+async function regrade(signal) {
+  if (!regradeControl(signal, Date.now()).show || !regradeGuard.tryAcquire(signal.id)) return
+  const instanceAtStart = props.instanceId
+  regrading.value = { ...regrading.value, [signal.id]: true }
+  regradeErrors.value = omit(regradeErrors.value, signal.id)
+  try {
+    const res = await fetch(`${signalsUrl()}/${encodeURIComponent(signal.id)}/regrade`, {
+      method: 'POST',
+      headers: authHeaders(),
+    })
+    if (disposed || props.instanceId !== instanceAtStart) return
+    if (res.ok) {
+      let body = null
+      try { body = await res.json() } catch { /* read the row from the list instead */ }
+      const row = body?.signal
+      if (row && typeof row === 'object' && row.regrade && typeof row.regrade === 'object') {
+        // Optimistic: the returned row (regrade queued) shows at once.
+        localRegrades = { ...localRegrades, [signal.id]: row.regrade }
+        signals.value = signals.value.map(s => (s.id === signal.id ? { ...s, ...row, id: s.id } : s))
+        nowMs.value = Date.now()
+        syncRegradePoll()
+      } else {
+        refresh()
+      }
+      return
+    }
+    let detail = ''
+    try { detail = (await res.json())?.detail } catch { /* keep */ }
+    const verdict = classifyRegradeFailure(res.status, detail)
+    if (verdict.stopPolling) {
+      stopPolling()
+      loadError.value = verdict.message
+      return
+    }
+    regradeErrors.value = { ...regradeErrors.value, [signal.id]: verdict.message }
+    if (verdict.reload) refresh()
+  } catch (e) {
+    if (disposed || props.instanceId !== instanceAtStart) return
+    regradeErrors.value = { ...regradeErrors.value, [signal.id]: classifyRegradeFailure(0, e?.message).message }
+  } finally {
+    regradeGuard.release(signal.id)
+    regrading.value = omit(regrading.value, signal.id)
   }
 }
 
@@ -555,14 +726,14 @@ function cancelConfirm(id) {
   confirming.value = omit(confirming.value, id)
 }
 
-async function submit(signal) {
+// `shown`: the row whose terms the operator confirmed (the review's live
+// row); a wheel approval sends its regrade.count for the server's version check.
+async function submit(signal, shown = signal) {
   const decision = confirming.value[signal.id]
   if (!decision || !guard.tryAcquire(signal.id)) return
   deciding.value = { ...deciding.value, [signal.id]: true }
   try {
-    const body = { decision }
-    const reason = String(reasons.value[signal.id] || '').trim()
-    if (reason) body.reason = reason
+    const body = decisionBody(decision, reasons.value[signal.id], shown)
     const res = await fetch(`${signalsUrl()}/${encodeURIComponent(signal.id)}/decision`, {
       method: 'POST',
       headers: authHeaders(),
@@ -595,9 +766,14 @@ async function submit(signal) {
       loadError.value = verdict.message
     }
     if (verdict.removeCard) removeCard(signal.id)
-    showNotice(verdict.kind === 'stale' ? 'warn' : 'error', verdict.message)
+    // Regraded since the review opened: the card stays pending and the
+    // re-read brings its new terms into the review, to approve again.
+    const since = latch.current()
+    if (verdict.kind === 'regraded') refresh()
+    showNotice(verdict.kind === 'stale' || verdict.kind === 'regraded' ? 'warn' : 'error', verdict.message)
     emit('decided')
-    return { kind: verdict.kind === 'stale' ? 'stale' : 'failed', message: verdict.message }
+    const kind = verdict.kind === 'stale' || verdict.kind === 'regraded' ? verdict.kind : 'failed'
+    return { kind, message: verdict.message, since }
   } catch (e) {
     const message = classifyDecisionFailure(0, e?.message).message
     showNotice('error', message)
@@ -613,12 +789,47 @@ async function submit(signal) {
 // review's confirm calls submit(signal) above, exactly as the inline step
 // did: same decision (confirming[id]), same optional reason (reasons[id]),
 // same guard against a second click. Reject keeps its inline confirm.
-const review = ref(null)        // { signal, decision } while open
+// { signal, decision, reviewed, adoptAfter } while open. `reviewed` is the row
+// whose terms the operator accepted: the row shown when the review opened,
+// or the live row after "Use new terms" or a 412. Confirm sends ITS
+// regrade.count, never the live row's, so a regrade that lands while the
+// review is open is refused (412) until the operator has seen it.
+const review = ref(null)
 const reviewResult = ref(null)  // { kind, message } once the request settled
 const reviewError = ref('')     // the last refusal; the confirm stays available
 let reviewCloseTimer = null
 
 const reviewBusy = computed(() => !!(review.value && deciding.value[review.value.signal.id]))
+// The review shows the card's latest row, so a regrade that lands while it
+// is open updates it; the snapshot stands in once the card has left the list.
+const reviewSignal = computed(() => {
+  const r = review.value
+  return r ? (signals.value.find(s => s.id === r.signal.id) || r.signal) : null
+})
+// A regrade landed while the review was open: the modal says so, with the
+// before -> after of the terms, until the operator accepts the new terms.
+const reviewDriftView = computed(() => {
+  const r = review.value
+  return r ? reviewDrift(r.reviewed, reviewSignal.value) : null
+})
+
+function acceptReviewTerms() {
+  const r = review.value
+  if (!r || reviewBusy.value || !reviewSignal.value) return
+  r.reviewed = reviewSignal.value
+}
+
+// After a 412 the re-read brings the new terms into the review; the first
+// load begun after the 412 makes them the reviewed terms (the 412 message
+// already told the operator to review them).
+function adoptReviewedAfter412(generation) {
+  const r = review.value
+  if (!r || r.adoptAfter == null || generation <= r.adoptAfter) return
+  const row = signals.value.find(s => s.id === r.signal.id)
+  if (row) r.reviewed = row
+  r.adoptAfter = null
+}
+
 // The signal left the queue while the review was open (decided on another
 // device, so a poll took its confirm with it): nothing can be sent from here.
 const shownReviewResult = computed(() => {
@@ -638,7 +849,7 @@ function onDecisionClick(signal, decision) {
   startConfirm(signal.id, decision)
   if (confirming.value[signal.id] !== decision) return
   clearTimeout(reviewCloseTimer)
-  review.value = { signal, decision }
+  review.value = { signal, decision, reviewed: signal, adoptAfter: null }
   reviewResult.value = null
   reviewError.value = ''
 }
@@ -647,9 +858,10 @@ async function confirmReview() {
   const r = review.value
   if (!r || reviewBusy.value || shownReviewResult.value) return
   reviewError.value = ''
-  const out = await submit(r.signal)
+  const out = await submit(r.signal, r.reviewed)
   if (!out || review.value !== r) return
-  if (out.kind === 'failed') {
+  if (out.kind === 'regraded') r.adoptAfter = out.since
+  if (out.kind === 'failed' || out.kind === 'regraded') {
     reviewError.value = out.message
     return
   }
@@ -688,6 +900,10 @@ function stopPolling() {
     clearInterval(pollTimer)
     pollTimer = null
   }
+  if (regradeTimer) {
+    clearInterval(regradeTimer)
+    regradeTimer = null
+  }
 }
 
 onMounted(() => {
@@ -696,6 +912,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  disposed = true
   stopPolling()
   clearTimeout(noticeTimer)
   clearTimeout(reviewCloseTimer)
@@ -704,6 +921,10 @@ onUnmounted(() => {
 // The wheel's scan rows read the pending queue to know which rows can jump
 // to a card here.
 watch(signals, list => emit('pending-ids', list.map(s => s.id)), { immediate: true })
+
+watch(() => props.refreshKey, (next, prev) => {
+  if (next !== prev) refresh()
+})
 
 watch(() => props.instanceId, (next, prev) => {
   if (next === prev) return
@@ -722,7 +943,11 @@ watch(() => props.instanceId, (next, prev) => {
   resentAt.clear()
   uncertain.value = {}
   stuckMemory.clear()
-  load()
+  localRegrades = {}
+  regradeErrors.value = {}
+  // A load still out for the old instance drops its answer; refresh() runs
+  // this instance's read after it rather than skipping it.
+  refresh()
   startPolling()
 })
 </script>

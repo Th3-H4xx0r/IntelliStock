@@ -200,6 +200,31 @@ export function uncertainMessage(what = 'Approval') {
   return `${what} received, but its delivery to the broker could not be confirmed. Do NOT place this order by hand — it may still be queued. The card will show submitted or failed shortly.`
 }
 
+/** The server's 412 detail, for a 412 that arrives without one. */
+const REGRADED_MESSAGE = 'This card was regraded since you opened it; review the new terms and approve again.'
+
+/**
+ * The POST .../decision body. A wheel approval (approve or approve_half,
+ * never reject) carries `expect_regrade_count`: the regrade.count (0 when
+ * absent) of the row the operator was shown, so the server can refuse with a
+ * 412 when a regrade changed the terms since.
+ */
+export function decisionBody(decision, reason, shownSignal) {
+  const body = { decision }
+  const text = String(reason ?? '').trim()
+  if (text) body.reason = text
+  if (shownSignal?.lane === 'wheel' && (decision === 'approve' || decision === 'approve_half')) {
+    body.expect_regrade_count = regradeCountOf(shownSignal)
+  }
+  return body
+}
+
+/** A row's regrade.count (regrades done) as an integer; 0 when absent or unusable. */
+export function regradeCountOf(signal) {
+  const n = finiteOrNull(signal?.regrade?.count)
+  return n == null ? 0 : Math.trunc(n)
+}
+
 export function classifyDecisionSuccess(status, body, signal, decision) {
   const uncertain = status === 202 || body?.uncertain === true
   if (!uncertain) return { uncertain: false, tone: 'ok', message: decisionSuccessMessage(signal, decision) }
@@ -221,6 +246,12 @@ export function classifyDecisionFailure(status, detail) {
   }
   if (status === 403) {
     return { kind: 'forbidden', removeCard: false, stopPolling: false, message: text || 'You are not allowed to decide this signal.' }
+  }
+  // 412: the wheel approval version check (expect_regrade_count). The card is
+  // still pending, but a regrade changed its terms since the operator opened
+  // it. Keep it and re-read; every 409 stays "decided elsewhere".
+  if (status === 412) {
+    return { kind: 'regraded', removeCard: false, stopPolling: false, message: text || REGRADED_MESSAGE }
   }
   if (status === 400 || status === 404 || status === 409) {
     return { kind: 'stale', removeCard: true, stopPolling: false, message: text || 'This signal is no longer pending — it was decided elsewhere.' }
@@ -603,4 +634,319 @@ export function itmTone(itmPct, dte) {
 export function fmtItm(itmPct) {
   if (itmPct == null) return '—'
   return itmPct > 0 ? `${itmPct.toFixed(1)}% ITM` : `${Math.abs(itmPct).toFixed(1)}% OTM`
+}
+
+// -- Wheel regrade (POST .../swing/signals/{id}/regrade) ------------------------
+//
+// A regrade re-scores one pending wheel card at today's prices on the
+// instance (backend swing_trader/wheel_manual.py). The POST returns at once
+// with the row's `regrade` block queued; the result lands on the signal row
+// about a minute later, which the signals list returns. A done + rescored
+// regrade rewrites the row's score, proposal and context in place and keeps
+// what the card said before in `regrade.previous`. It never changes the
+// signal's status (operator ruling 2026-11-18): a card that no longer
+// qualifies stays pending with a warning, and a failed regrade keeps the old
+// values.
+
+/** A regrade still queued or running after this long is dead (wheel_manual.REGRADE_STALE_S). */
+export const REGRADE_STALE_MS = 5 * 60 * 1000
+
+function regradeOf(signal) {
+  const r = signal?.regrade
+  return r && typeof r === 'object' ? r : null
+}
+
+function parseMs(value) {
+  if (value == null || value === '') return null
+  const t = Date.parse(value)
+  return Number.isFinite(t) ? t : null
+}
+
+/**
+ * 'idle' | 'live' | 'stale' | 'done' | 'failed'. A queued or running
+ * regrade is live while its request is at most REGRADE_STALE_MS old (the
+ * server's own rule, so a click it would answer 409 stays disabled), and
+ * stale after that or when undated: the server lets it be asked for again.
+ */
+export function regradeState(signal, nowMs = Date.now()) {
+  const r = regradeOf(signal)
+  const status = r?.status
+  if (status === 'done' || status === 'failed') return status
+  if (status === 'queued' || status === 'running') {
+    const at = parseMs(r.requested_at)
+    return at != null && nowMs - at <= REGRADE_STALE_MS ? 'live' : 'stale'
+  }
+  return 'idle'
+}
+
+/** True while any card has a live regrade: the list is then re-read every few seconds. */
+export function anyRegradeLive(signals, nowMs = Date.now()) {
+  return (signals || []).some(s => regradeState(s, nowMs) === 'live')
+}
+
+/** The card's Regrade button: only on a pending wheel card, disabled while one is live. */
+export function regradeControl(signal, nowMs = Date.now()) {
+  const show = signal?.lane === 'wheel' && signal?.status === 'pending'
+  const live = show && regradeState(signal, nowMs) === 'live'
+  return { show, disabled: live, label: live ? 'Regrading…' : 'Regrade' }
+}
+
+const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const NY_STAMP = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York', weekday: 'short', year: 'numeric', month: 'numeric', day: 'numeric',
+  hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+})
+
+/** "Fri 20 Nov, 10:42 ET" for epoch ms, New York time. Months are built here, never ICU's "Sept". */
+function fmtNyStamp(ms) {
+  const p = Object.fromEntries(NY_STAMP.formatToParts(new Date(ms)).map(x => [x.type, x.value]))
+  return `${p.weekday} ${Number(p.day)} ${MONTHS_SHORT[Number(p.month) - 1]}, ${p.hour}:${p.minute} ET`
+}
+
+/**
+ * When the card's current score was made: `regrade.scored_at` (set by a
+ * regrade that rescored it, carried through later blocks), else
+ * `created_at`. "Scored Fri 20 Nov, 10:42 ET".
+ */
+export function scoredAtLabel(signal) {
+  const at = parseMs(regradeOf(signal)?.scored_at || signal?.created_at)
+  return at == null ? 'Score time unknown' : `Scored ${fmtNyStamp(at)}`
+}
+
+/** "+8.0%" / "-3.2%" / "0.0%" from `before` to `after`, or null. */
+export function pctMove(before, after) {
+  const a = finiteOrNull(before)
+  const b = finiteOrNull(after)
+  if (a == null || b == null || a <= 0) return null
+  const pct = Number(((b - a) / a * 100).toFixed(1))
+  if (pct === 0) return '0.0%'
+  return `${pct > 0 ? '+' : '-'}${Math.abs(pct).toFixed(1)}%`
+}
+
+function fmtScore(value) {
+  const n = finiteOrNull(value)
+  return n == null ? '—' : String(n)
+}
+
+/**
+ * The before -> after rows of a done regrade that rescored the card:
+ * [{ label, before, after, move }] for score, stock price (move = its
+ * percent change), strike and premium. null otherwise: rescored false means
+ * the name failed today's screen and nothing on the card changed.
+ */
+export function regradeChanges(signal) {
+  const r = regradeOf(signal)
+  if (r?.status !== 'done' || r.rescored !== true) return null
+  const prev = r.previous && typeof r.previous === 'object' ? r.previous : {}
+  const p = signal?.proposal && typeof signal.proposal === 'object' ? signal.proposal : {}
+  const stock = signal?.context?.stock_price
+  return [
+    { label: 'Score', before: fmtScore(prev.score), after: fmtScore(signal?.score), move: null },
+    { label: 'Stock', before: fmtUsd(prev.stock_price), after: fmtUsd(stock), move: pctMove(prev.stock_price, stock) },
+    { label: 'Strike', before: fmtUsd(prev.strike), after: fmtUsd(p.strike), move: null },
+    { label: 'Premium', before: fmtUsd(prev.premium_est), after: fmtUsd(p.premium_est), move: null },
+  ]
+}
+
+/**
+ * The card's regrade warnings, [] when none. "No longer qualifies" whenever
+ * `qualifies` is false, whatever the status: the server carries it through
+ * later queued and failed blocks until a done regrade overwrites it. Beside
+ * it, a failed regrade (the instance's error, verbatim) or a stale one (read
+ * as failed; it can be asked for again).
+ */
+export function regradeWarnings(signal, nowMs = Date.now()) {
+  const r = regradeOf(signal)
+  const out = []
+  if (r?.qualifies === false) {
+    const reason = String(r.reason ?? '').trim()
+    out.push(reason ? `No longer qualifies: ${reason}` : 'No longer qualifies')
+  }
+  const state = regradeState(signal, nowMs)
+  if (state === 'failed') {
+    const error = String(r.error ?? '').trim()
+    out.push(error ? `Regrade failed: ${error}` : 'Regrade failed')
+  } else if (state === 'stale') {
+    out.push('Regrade failed: no result after 5 minutes. You can regrade again.')
+  }
+  return out
+}
+
+/**
+ * The review opened on `reviewed` (the row the operator read); `live` is
+ * the card's row now. null while their regrade counts match. Otherwise a
+ * regrade landed while the review was open: { from, to, rows }, the count
+ * change and the terms that differ, [{ label, before, after, move }] for
+ * score, stock price (move = its percent change), strike, expiry, qty and
+ * premium. rows is empty when the regrade changed none of them (it did not
+ * rescore); the server still refuses the old count.
+ */
+export function reviewDrift(reviewed, live) {
+  if (!reviewed || !live) return null
+  const from = regradeCountOf(reviewed)
+  const to = regradeCountOf(live)
+  if (from === to) return null
+  const fields = [
+    ['Score', s => fmtScore(s?.score)],
+    ['Stock', s => fmtUsd(s?.context?.stock_price)],
+    ['Strike', s => fmtUsd(s?.proposal?.strike)],
+    ['Expiry', s => (s?.proposal?.expiry ? String(s.proposal.expiry) : '—')],
+    ['Qty', s => fmtCount(s?.proposal?.qty)],
+    ['Premium', s => fmtUsd(s?.proposal?.premium_est)],
+  ]
+  const rows = fields
+    .map(([label, read]) => ({
+      label, before: read(reviewed), after: read(live),
+      move: label === 'Stock' ? pctMove(reviewed?.context?.stock_price, live?.context?.stock_price) : null,
+    }))
+    .filter(row => row.before !== row.after)
+  return { from, to, rows }
+}
+
+function regradeKey(signal) {
+  const r = regradeOf(signal)
+  return r ? `${r.status ?? ''}|${r.requested_at ?? ''}` : ''
+}
+
+/**
+ * The refused-regrade messages (signal id -> text) still worth showing after
+ * a load: an entry goes when its card left the list, or when the card's
+ * regrade status or requested_at changed since the previous rows (the
+ * refusal is about a state that is gone). A card absent before keeps it.
+ */
+export function pruneRegradeErrors(errors, beforeRows, afterRows) {
+  const before = new Map((beforeRows || []).map(s => [s?.id, s]))
+  const after = new Map((afterRows || []).map(s => [s?.id, s]))
+  const keep = {}
+  for (const [id, text] of Object.entries(errors || {})) {
+    if (!after.has(id)) continue
+    if (before.has(id) && regradeKey(before.get(id)) !== regradeKey(after.get(id))) continue
+    keep[id] = text
+  }
+  return keep
+}
+
+/**
+ * The regrade block a POST just returned (`local`: signal id -> block), kept
+ * on its row until a poll shows it: a poll already in flight when the POST
+ * answered can carry the row from before. Each row gets whichever block was
+ * requested later (both stamps are the server's); an entry is dropped once
+ * the server's row has caught up, or the card is gone. Returns { rows, local }.
+ */
+export function applyLocalRegrades(rows, local) {
+  const keep = {}
+  const out = (rows || []).map(row => {
+    const mine = local?.[row?.id]
+    if (!mine) return row
+    const theirs = parseMs(row?.regrade?.requested_at)
+    const ours = parseMs(mine.requested_at)
+    if (theirs != null && (ours == null || theirs >= ours)) return row
+    keep[row.id] = mine
+    return { ...row, regrade: mine }
+  })
+  return { rows: out, local: keep }
+}
+
+/** "The instance is not running", with the server's detail appended (plan, UI behaviour). */
+function notRunningMessage(text) {
+  return text ? `Instance is not running: ${text}` : 'Instance is not running.'
+}
+
+/**
+ * A failed POST .../regrade: { message, reload, stopPolling }. 409: one is
+ * already under way (`reload`: a re-read shows it). 503: the instance is not
+ * running, or the request could not be queued. 400/404: no longer a pending
+ * wheel card; a re-read settles it.
+ */
+export function classifyRegradeFailure(status, detail) {
+  const text = detailText(detail)
+  if (status === 401) return { message: 'Session expired — please sign in again.', reload: false, stopPolling: true }
+  if (status === 409) return { message: 'Regrade already under way.', reload: true, stopPolling: false }
+  if (status === 503) return { message: notRunningMessage(text), reload: false, stopPolling: false }
+  if (status === 400 || status === 404) {
+    return { message: text || 'This card can no longer be regraded.', reload: true, stopPolling: false }
+  }
+  if (!status) return { message: text || 'Could not reach the server.', reload: false, stopPolling: false }
+  return { message: text || `Regrade failed (${status})`, reload: false, stopPolling: false }
+}
+
+// -- Manual wheel run (POST / GET .../wheel/scan) -------------------------------
+//
+// Review only: a run adds pending cards and never places an order, even at
+// score 75+ (operator ruling 2026-11-18). The server's `in_progress` is the
+// truth: it already reads a run whose heartbeat stopped as not in progress.
+
+function count(value) {
+  const n = finiteOrNull(value)
+  return n == null ? 0 : Math.trunc(n)
+}
+
+function runProgress(run) {
+  const phase = run?.phase
+  if (phase === 'queued') return 'Queued: waiting for the instance to start it'
+  if (phase === 'screening') return 'Screening the wheel universe'
+  if (phase === 'earnings') {
+    return `Checking earnings dates · ${count(run.passed_screen)} of ${count(run.scanned)} passed the screen`
+  }
+  if (phase === 'scoring') {
+    const found = count(run.new_pending)
+    return `Scoring with the AI · ${count(run.scored)} of ${count(run.to_score)} scored · ` +
+      `${found} new card${found === 1 ? '' : 's'} so far`
+  }
+  return 'Running'
+}
+
+function runCounts(run) {
+  return [
+    { label: 'Scanned', value: count(run.scanned) },
+    { label: 'Passed screen', value: count(run.passed_screen) },
+    { label: 'Scored', value: count(run.scored) },
+    { label: 'New cards', value: count(run.new_pending) },
+    { label: 'Rejected', value: count(run.rejected) },
+    { label: 'Already had a card', value: count(run.skipped_existing) },
+    { label: 'Errors', value: count(run.errors) },
+  ]
+}
+
+/**
+ * What the wheel panel shows for the newest run (GET .../wheel/scan's `run`
+ * and `in_progress`): { state, when, progress, counts, error }.
+ * state: 'none' | 'running' | 'done' | 'failed' | 'stopped' (still marked
+ * running, but the server says it is not in progress: it died). `when` is
+ * the finish time, or the start while running or stopped.
+ */
+export function manualRunView(run, inProgress) {
+  const row = run && typeof run === 'object' ? run : null
+  const view = { state: 'none', when: '', progress: '', counts: [], error: '' }
+  if (inProgress) {
+    const at = parseMs(row?.started_at)
+    return { ...view, state: 'running', when: at == null ? '' : fmtNyStamp(at), progress: runProgress(row) }
+  }
+  if (!row) return view
+  const status = row.status
+  const at = parseMs(status === 'done' || status === 'failed' ? row.finished_at : row.started_at)
+  const when = at == null ? '' : fmtNyStamp(at)
+  if (status === 'done') return { ...view, state: 'done', when, counts: runCounts(row) }
+  if (status === 'failed') {
+    const error = String(row.error ?? '').trim()
+    return { ...view, state: 'failed', when, error: error ? `Run failed: ${error}` : 'Run failed' }
+  }
+  return {
+    ...view, state: 'stopped', when,
+    error: 'The last run stopped before it finished (the instance may have restarted). You can run it again.',
+  }
+}
+
+/**
+ * A failed POST .../wheel/scan: { message, refresh, stopPolling }. 409: a
+ * run is already under way (`refresh`: read it and show its progress). 503:
+ * the instance is not running, or the request could not be queued.
+ */
+export function classifyRunFailure(status, detail) {
+  const text = detailText(detail)
+  if (status === 401) return { message: 'Session expired — please sign in again.', refresh: false, stopPolling: true }
+  if (status === 409) return { message: 'A wheel run is already under way.', refresh: true, stopPolling: false }
+  if (status === 503) return { message: notRunningMessage(text), refresh: false, stopPolling: false }
+  if (!status) return { message: text || 'Could not reach the server.', refresh: false, stopPolling: false }
+  return { message: text || `Could not start the run (${status})`, refresh: false, stopPolling: false }
 }
