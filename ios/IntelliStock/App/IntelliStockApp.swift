@@ -16,6 +16,7 @@ struct IntelliStockApp: App {
                 .onAppear {
                     appDelegate.attach(push: services.push)
                     appDelegate.attach(updates: services.appUpdates)
+                    appDelegate.attach(openApproval: { [services] id in services.openApproval(id) })
                 }
         }
     }

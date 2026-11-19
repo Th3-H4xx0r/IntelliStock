@@ -4,7 +4,8 @@ import UserNotifications
 /// The push half of `mobile/ios/Runner/AppDelegate.swift`: makes the app the
 /// notification-center delegate at launch, hands the APNs device token to
 /// `PushService`, and shows banners while the app is in the foreground. The
-/// "update available" push goes to `AppUpdateCenter` instead.
+/// "update available" push goes to `AppUpdateCenter` instead, and a tapped
+/// MCP_APPROVAL push opens its approval.
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     private var push: PushService?
     /// A token that arrived before `attach(push:)`, forwarded on attach.
@@ -12,6 +13,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     private weak var updates: AppUpdateCenter?
     /// An update push tapped before `attach(updates:)` (a cold launch from it).
     private var pendingUpdateTap = false
+    /// Opens an approval by id (`AppServices.openApproval`).
+    private var openApproval: ((String) -> Void)?
+    /// An approval push tapped before `attach(openApproval:)` (a cold launch from it).
+    private var pendingApprovalId: String?
 
     func application(
         _ application: UIApplication,
@@ -41,6 +46,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         }
     }
 
+    /// Connects the delegate to the approval screen, opening an approval push
+    /// tapped before it.
+    func attach(openApproval: @escaping (String) -> Void) {
+        self.openApproval = openApproval
+        if let id = pendingApprovalId {
+            pendingApprovalId = nil
+            openApproval(id)
+        }
+    }
+
     // APNs handed us a device token — forward its hex form to the backend.
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         guard let push else {
@@ -66,13 +81,31 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         return [.banner, .sound, .badge]
     }
 
-    // A tapped update push opens the app onto the sheet, even after Later.
+    // A tapped update push opens the app onto the sheet, even after Later; a
+    // tapped approval push opens that approval. Only the Sendable values read
+    // here cross to the main actor.
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
-        guard AppUpdateRules.isUpdatePush(response.notification.request.content.userInfo) else { return }
-        await updatePushTapped()
+        let info = response.notification.request.content.userInfo
+        let isUpdate = AppUpdateRules.isUpdatePush(info)
+        let id = ApprovalPush.approvalId(from: info)
+        await routeTap(isUpdate: isUpdate, approvalId: id)
+    }
+
+    /// Where a tapped push goes: the update sheet, or the approval it names —
+    /// held until `attach(openApproval:)` when nothing is attached yet.
+    func routeTap(isUpdate: Bool, approvalId: String?) {
+        if isUpdate {
+            updatePushTapped()
+        } else if let approvalId {
+            if let openApproval {
+                openApproval(approvalId)
+            } else {
+                pendingApprovalId = approvalId
+            }
+        }
     }
 
     private func updatePushArrived() -> Bool {

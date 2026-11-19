@@ -317,6 +317,15 @@ final class AppServices {
             loginRedirectTab = nil
         }
     }
+
+    /// A tapped MCP_APPROVAL push: `intellistock://approvals/<id>` through the
+    /// deep-link gate — opened at once when signed in (behind the lock while
+    /// locked, so it shows on unlock), kept as the post-login redirect when
+    /// signed out. An invalid id opens nothing.
+    func openApproval(_ id: String) {
+        guard ApprovalIds.isValid(id), let url = URL(string: "intellistock:/" + Route.approval(id).path) else { return }
+        openDeepLink(url)
+    }
 }
 
 /// A registrar that does nothing, for previews and tests.
