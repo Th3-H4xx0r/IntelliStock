@@ -127,7 +127,7 @@ def test_list_tools_builtins_plus_direct(api, catalog, caplog):
 
     tools = _tools(registry)
     # The built-ins keep their own schemas; the operations that claimed their names do not replace them.
-    assert tools["get_approval"].input_schema["properties"]["id"]["pattern"] == "^[A-Za-z0-9_-]{1,64}$"
+    assert tools["get_approval"].input_schema["properties"]["id"]["pattern"] == "^[A-Za-z0-9_-]{1,128}$"
     limit = tools["list_pending_approvals"].input_schema["properties"]["limit"]
     assert (limit["type"], limit["minimum"], limit["maximum"], limit["default"]) == ("integer", 1, 50, 50)
     assert "query" in tools["find_endpoints"].input_schema["properties"]
@@ -166,6 +166,7 @@ def test_builtin_input_schemas(registry):
 
     approval = tools["get_approval"].input_schema
     assert approval["required"] == ["id"]
+    assert approval["properties"]["id"]["pattern"] == "^[A-Za-z0-9_-]{1,128}$"  # contract section 5
 
     pending = tools["list_pending_approvals"].input_schema
     assert pending.get("required", []) == []
@@ -474,6 +475,21 @@ async def test_get_approval_redacts_result(registry, fake):
 
     fake.set_route("GET", "/mcp/approvals/gone", 404, {"detail": "approval not found"})
     assert _error(await _call(registry, "get_approval", {"id": "gone"}))["status"] == 404
+
+
+async def test_get_approval_id_length_follows_contract(registry, fake):
+    # Contract section 5: approval ids match ^[A-Za-z0-9_-]{1,128}$.
+    longest = "a" * 127 + "_"
+    fake.set_route("GET", "/mcp/approvals/" + longest, 200, {"id": longest, "status": "pending"})
+    accepted = await _call(registry, "get_approval", {"id": longest})
+    assert accepted.is_error is False
+    assert _raw_path(fake.requests[-1]) == "/mcp/approvals/" + longest
+
+    sent = len(fake.requests)
+    for bad in ("a" * 129, "", "a.b"):
+        error = _error(await _call(registry, "get_approval", {"id": bad}))
+        assert error["message"].startswith("Invalid arguments: $.id: "), bad
+    assert len(fake.requests) == sent
 
 
 async def test_list_pending_approvals_query(registry, fake):
