@@ -210,12 +210,16 @@ from interactive_utils import (
     action_list_push_devices,
     SwingBrokerUnavailableError,
     SwingDecisionRaceError,
+    SwingRegradeMismatchError,
     SwingResendConflictError,
     action_swing_list_signals,
     action_swing_decide_signal,
     action_swing_resend_signal,
     action_wheel_overview,
     action_swing_calibration,
+    action_swing_regrade_signal,
+    action_wheel_manual_scan,
+    action_wheel_manual_scan_status,
 )
 
 # OpenAPI / Swagger UI off in production unless API_DOCS_PUBLIC says otherwise.
@@ -1153,6 +1157,7 @@ _CODE_FINGERPRINT_FILES = (
     "swing_trader/notify.py",
     "swing_trader/refdata.py",
     "swing_trader/signals_store.py",
+    "swing_trader/wheel_manual.py",
     "swing_trader/refdata_build.py",
     "swing_trader/refdata_sync.py",
     "swing_trader/backtest_bars.py",
@@ -4148,6 +4153,9 @@ def api_get_live_command(command_id: str, conn=Depends(conn_dependency), current
 class SwingDecisionBody(BaseModel):
     decision: str = Field(pattern="^(approve|approve_half|reject)$")
     reason: Optional[str] = None      # both UIs omit it when blank
+    # The card's regrade.count (0 when never regraded) as the client rendered
+    # it. An approval that no longer matches is a 412. Absent: no check.
+    expect_regrade_count: Optional[int] = Field(default=None, ge=0)
 
 
 @app.get("/instances/{instance_id}/swing/signals", response_class=JSONResponse)
@@ -4172,6 +4180,9 @@ def api_swing_decide_signal(instance_id: str, signal_id: str, body: SwingDecisio
       {"uncertain": true, "detail"}; check the signal status and open orders.
     - 400: the signal is no longer pending. 404: unknown, or another
       instance's. 409: a concurrent click won. 422: a malformed body.
+    - 412: an approval sent `expect_regrade_count` and the card has been
+      regraded since (new strike, size and score): re-read it and approve
+      again. Never for a rejection, nor when the field is absent.
     - 503: the approval provably did not reach the broker (the instance is
       not running or has crashed, or the command was not queued and the
       signal was put back to pending): try again.
@@ -4180,7 +4191,10 @@ def api_swing_decide_signal(instance_id: str, signal_id: str, body: SwingDecisio
         out = _run(action_swing_decide_signal, conn, instance_id, signal_id,
                    body.decision, body.reason,
                    str(current_user.get("username") or current_user.get("id")
-                       or "operator"))
+                       or "operator"),
+                   expect_regrade_count=body.expect_regrade_count)
+    except SwingRegradeMismatchError as exc:
+        raise HTTPException(status_code=412, detail=str(exc))
     except SwingDecisionRaceError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except SwingBrokerUnavailableError as exc:
@@ -4229,6 +4243,57 @@ def api_wheel_overview(instance_id: str, conn=Depends(conn_dependency),
         return _run(action_wheel_overview, conn, instance_id)
     except SwingBrokerUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/instances/{instance_id}/swing/signals/{signal_id}/regrade",
+          response_class=JSONResponse)
+def api_swing_regrade_signal(instance_id: str, signal_id: str,
+                             conn=Depends(conn_dependency),
+                             current_user: dict = Depends(get_current_user)):
+    """Re-score one pending wheel signal at today's prices. Returns at once
+    with the signal's `regrade` block set to queued; the instance finishes in
+    about a minute and the signal list then carries the new score, strike and
+    `regrade.status` done or failed. The signal stays pending.
+
+    - 400: not a pending wheel signal, or the instance's strategy has no
+      enabled wheel lane. 404: unknown, or another instance's.
+    - 409: a regrade of this signal is already under way.
+    - 503: the instance is not running, or the request could not be queued.
+    """
+    try:
+        return _run(action_swing_regrade_signal, conn, instance_id, signal_id,
+                    str(current_user.get("username") or current_user.get("id")
+                        or "operator"))
+    except SwingDecisionRaceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except SwingBrokerUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/instances/{instance_id}/wheel/scan", response_class=JSONResponse)
+def api_wheel_manual_scan(instance_id: str, conn=Depends(conn_dependency),
+                          current_user: dict = Depends(get_current_user)):
+    """Run the wheel scan now. Review only: it adds pending cards and never
+    places an order. 400 when the instance's strategy has no enabled wheel
+    lane; 409 while a run is under way; 503 when the instance is not running
+    or the request could not be queued. On the weekly scan's day (and its
+    fallback day) before that week's scan has completed, the instance refuses
+    the run: the run row reads failed with the reason."""
+    try:
+        return _run(action_wheel_manual_scan, conn, instance_id,
+                    str(current_user.get("username") or current_user.get("id")
+                        or "operator"))
+    except SwingDecisionRaceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except SwingBrokerUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/instances/{instance_id}/wheel/scan", response_class=JSONResponse)
+def api_wheel_manual_scan_status(instance_id: str, conn=Depends(conn_dependency),
+                                 current_user: dict = Depends(get_current_user)):
+    """The newest manual wheel run and whether it is still going."""
+    return _run(action_wheel_manual_scan_status, conn, instance_id)
 
 
 @app.get("/instances/{instance_id}/swing/calibration", response_class=JSONResponse)

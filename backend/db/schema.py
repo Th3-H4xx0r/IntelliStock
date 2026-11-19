@@ -116,7 +116,7 @@ ALL_TABLES: tuple = (
     "OutlierUniverseFeatures", "PointInTimeDatasetSnapshots",
     "PointInTimeManifests", "PriceHistory", "PushDevices", "Stocks", "Strategies",
     "SwingDailyBars", "SwingIndexMembership", "SwingIvSnapshots", "SwingMacroDaily",
-    "SwingSectorMap", "SwingSignals", "SwingWheelScans",
+    "SwingSectorMap", "SwingSignals", "SwingWheelRuns", "SwingWheelScans",
     "TickerDayFeatures", "TrendFilingsPIT", "TrendIngestProgress", "TrendMacroPIT",
     "TrendNewsPIT", "TrendResearchJobs", "TrendResearchLedger", "TrendThemesPIT",
     "Users",
@@ -288,6 +288,7 @@ _SPECS = [
     # the NY trading date, so a bytewise prefix scan is the whole access path.
     TableSpec("SwingSignals", indexed_fields=("instance_id",)),
     TableSpec("SwingWheelScans", indexed_fields=("instance_id",)),
+    TableSpec("SwingWheelRuns", indexed_fields=("instance_id",)),
     TableSpec("SwingIvSnapshots", prefix_fields=("id",)),
     TableSpec("SwingMacroDaily", prefix_fields=("id",)),
     TableSpec("SwingIndexMembership", prefix_fields=("id",)),

@@ -12206,6 +12206,14 @@ def _execute_live_command(adapter, cmd: dict, order_service=None) -> tuple[bool,
     ctype = str(cmd.get("type") or "").lower()
     payload = dict(cmd.get("payload") or {})
     try:
+        if ctype in ("swing_regrade", "wheel_manual_scan"):
+            # Operator-triggered wheel work (regrade one card, run a scan
+            # now). It places NO order and returns at once: the scoring runs
+            # on its own thread inside swing_trader.wheel_manual, so a `halt`
+            # behind it in this queue is never kept waiting.
+            from swing_trader import wheel_manual as _wheel_manual
+            return _wheel_manual.execute_command(
+                ctype, payload, instance_id=str(instance_id))
         if ctype == "halt":
             # Halt = set runCommand=False on the instance so the supervisor
             # kills the broker subprocess. Does NOT liquidate. Also cancel

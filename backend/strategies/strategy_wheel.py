@@ -32,6 +32,7 @@ from swing_trader import (  # noqa: E402
     notify,
     signals_store,
     universe,
+    wheel_manual,
     wheel_rules,
 )
 from swing_trader.constants import (  # noqa: E402
@@ -282,6 +283,15 @@ def _monitor_start(today, monitor_time, close):
     return start - _GRID if start >= close else start
 
 
+def _forget_manual_context(cfg) -> None:
+    """The lane is off (or cannot read the book): the operator's regrades and
+    manual runs stop with it instead of running on the last tick's config."""
+    try:
+        wheel_manual.forget_context(str(cfg.get("instance_id") or "wheel"))
+    except Exception:  # pragma: no cover - never costs a tick
+        pass
+
+
 class StrategyWheel:
     # broker.py resolves strategy_wheel -> StrategyWheel; the name is not free.
 
@@ -290,6 +300,7 @@ class StrategyWheel:
                  time_increment=None, mode=None, **kwargs):
         cfg = {**DEFAULTS, **(config or {})}
         if not _truthy(cfg.get("strategy_wheel_enabled", False)):
+            _forget_manual_context(cfg)
             return {}
         cache = strategy_cache if isinstance(strategy_cache, dict) else {}
         if data is not None:
@@ -302,7 +313,20 @@ class StrategyWheel:
         if portfolio_emulator is None:
             _log_once(cache, "no-emulator", str(current_time)[:10],
                       "StrategyWheel: REFUSING — no broker adapter to read the book.", "red")
+            _forget_manual_context(cfg)
             return {}
+        # The operator's regrade and manual-run commands arrive on the broker's
+        # command thread, which has no resolved lane config (data credentials,
+        # the linked model). Hand it this tick's. Before the trading-day check
+        # on purpose: a manual run is allowed on any day the instance ticks.
+        # The weekly scan's completion marker is read live from this cache, so
+        # a manual run on scan day waits for this week's scan (wheel_manual).
+        try:
+            wheel_manual.remember_context(str(cfg.get("instance_id") or "wheel"), cfg,
+                                          portfolio_emulator,
+                                          weekly_marker=lambda: cache.get(_COMPLETE_KEY))
+        except Exception:  # pragma: no cover - never costs a tick
+            pass
         session = clock.ny_date(current_time)
         today = date.fromisoformat(session)
         if not clock.is_trading_day(today):
