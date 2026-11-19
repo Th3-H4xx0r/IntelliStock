@@ -336,3 +336,138 @@ def test_mcp_wrong_source_is_rejected_before_any_claim(conv, store, monkeypatch)
         m.approve()
     assert conv.find_message(conv.get_conversation(None, "u1", m.cid), m.mid)["status"] == "pending_confirmation"
     assert m.calls == []
+
+
+# ── confirm_pending_tool: the /confirm-tool path claims the same way ────────
+
+
+def _confirm(conv, store, monkeypatch, *, racing=False, source="orchestration", **seed):
+    """Seed one fake_write approval and wire orchestration to a recording tool.
+
+    ``calls`` collects the tool's arguments per run. _resume_after_tool_results
+    is replaced by an echo of the messages it is handed, so no LLM runs and
+    nothing is appended (append_messages is SQL). ``racing`` as in _mcp."""
+    from chatbot import orchestration
+
+    cid, mid = _seed(conv, store, source=source, **seed)
+    if racing:
+        monkeypatch.setattr(conv, "store", _RacingStore(store))
+    calls = []
+    tool = SimpleNamespace(name="fake_write", safety="write", description="",
+                           executor=lambda ctx, args: calls.append(dict(args)) or {"done": True})
+    monkeypatch.setattr(orchestration, "get_tool", lambda n: tool if n == "fake_write" else None)
+    monkeypatch.setattr(orchestration, "_resume_after_tool_results",
+                        lambda conn, user, conv_id, appended: list(appended))
+
+    def confirm(approved):
+        return orchestration.confirm_pending_tool(None, {"id": "u1", "username": "op"}, cid, mid, approved)
+
+    return SimpleNamespace(cid=cid, mid=mid, calls=calls,
+                           approve=lambda: confirm(True), decline=lambda: confirm(False))
+
+
+def test_two_concurrent_confirm_tool_approvals_execute_once(conv, store, monkeypatch):
+    m = _confirm(conv, store, monkeypatch, racing=True)
+    outcomes = _race(m.approve, m.approve)
+    assert m.calls == [{"qty": 1}]
+    assert sorted(k for k, _ in outcomes) == ["err", "ok"]
+    err = next(v for k, v in outcomes if k == "err")
+    assert isinstance(err, ValueError) and "no pending tool found on that message" in str(err)
+    winner = next(v for k, v in outcomes if k == "ok")
+    assert [msg["role"] for msg in winner] == ["tool"]
+    final = conv.find_message(conv.get_conversation(None, "u1", m.cid), m.mid)
+    assert final["status"] == "complete" and final["pending_tool"] is None
+
+
+def test_concurrent_confirm_tool_approve_and_decline_apply_exactly_one(conv, store, monkeypatch):
+    m = _confirm(conv, store, monkeypatch, racing=True)
+    outcomes = _race(m.approve, m.decline)
+    assert [k for k, _ in outcomes].count("ok") == 1
+    err = next(v for k, v in outcomes if k == "err")
+    assert isinstance(err, ValueError) and "no pending tool found on that message" in str(err)
+    winner = next(v for k, v in outcomes if k == "ok")
+    declined = any("user_declined" in (msg.get("content") or "") for msg in winner)
+    assert len(m.calls) + int(declined) == 1 and len(winner) == 1
+    final = conv.find_message(conv.get_conversation(None, "u1", m.cid), m.mid)
+    assert final["status"] == "complete" and final["pending_tool"] is None
+
+
+def test_confirm_tool_on_an_executing_message_never_runs(conv, store, monkeypatch):
+    m = _confirm(conv, store, monkeypatch, status="executing")
+    with pytest.raises(ValueError, match="no pending tool found on that message"):
+        m.approve()
+    assert m.calls == []
+
+
+def test_confirm_tool_final_message_keeps_its_tool_calls(conv, store, monkeypatch):
+    m = _confirm(conv, store, monkeypatch)
+    out = m.approve()
+    assert m.calls == [{"qty": 1}] and [msg["role"] for msg in out] == ["tool"]
+    final = conv.find_message(conv.get_conversation(None, "u1", m.cid), m.mid)
+    assert final["status"] == "complete" and final["pending_tool"] is None
+    assert final["tool_calls"] == [{"id": "tc-1", "name": "fake_write", "arguments": {"qty": 1}}]
+
+
+def test_confirm_tool_decline_fills_in_missing_tool_calls(conv, store, monkeypatch):
+    """A pending message saved without tool_calls is resolved with one built
+    from its pending_tool, so the decline message that follows has a parent."""
+    m = _confirm(conv, store, monkeypatch)
+    msgs = conv.get_conversation(None, "u1", m.cid)["messages"]
+    msgs[0]["tool_calls"] = None
+    store.update(conv.TABLE, m.cid, {"messages": msgs})
+    out = m.decline()
+    assert m.calls == []
+    assert [(msg["role"], msg["tool_call_id"]) for msg in out] == [("tool", "tc-1")]
+    assert "user_declined" in out[0]["content"]
+    final = conv.find_message(conv.get_conversation(None, "u1", m.cid), m.mid)
+    assert final["status"] == "complete" and final["pending_tool"] is None
+    assert final["tool_calls"] == [{"id": "tc-1", "name": "fake_write", "arguments": {"qty": 1}}]
+
+
+@pytest.mark.parametrize("outer", ["confirm_tool", "mcp_confirm"])
+def test_an_approval_on_the_other_endpoint_while_the_tool_runs_is_refused(conv, store, monkeypatch, outer):
+    """/mcp-confirm and /confirm-tool claim through the same compare-and-swap,
+    so an approval that lands on one endpoint while the other's tool is
+    running is refused instead of running the tool a second time."""
+    from chatbot import mcp_bridge, orchestration
+
+    m = _mcp(conv, store, monkeypatch)
+    monkeypatch.setattr(orchestration, "_resume_after_tool_results",
+                        lambda conn, user, conv_id, appended: list(appended))
+    via = {
+        "mcp_confirm": m.approve,
+        "confirm_tool": lambda: orchestration.confirm_pending_tool(
+            None, {"id": "u1", "username": "op"}, m.cid, m.mid, True),
+    }
+    inner = next(fn for name, fn in via.items() if name != outer)
+    inner_outcome = []
+
+    def run_while_the_other_endpoint_approves(ctx, args):
+        m.calls.append(dict(args))
+        if len(m.calls) == 1:
+            try:
+                inner()
+                inner_outcome.append("ran")
+            except ValueError as e:
+                inner_outcome.append(str(e))
+        return {"done": True}
+
+    tool = SimpleNamespace(name="fake_write", safety="write", description="",
+                           executor=run_while_the_other_endpoint_approves)
+    monkeypatch.setattr(mcp_bridge, "get_tool", lambda n: tool if n == "fake_write" else None)
+    monkeypatch.setattr(orchestration, "get_tool", lambda n: tool if n == "fake_write" else None)
+    via[outer]()
+    assert m.calls == [{"qty": 1}]
+    assert len(inner_outcome) == 1 and "no pending tool" in inner_outcome[0]
+    final = conv.find_message(conv.get_conversation(None, "u1", m.cid), m.mid)
+    assert final["status"] == "complete" and final["pending_tool"] is None
+
+
+def test_llm_history_tolerates_a_stranded_executing_message():
+    from chatbot import orchestration
+
+    stranded = {"id": "a1", "role": "assistant", "content": "needs approval", "status": "executing",
+                "tool_calls": [{"id": "tc-1", "name": "fake_write", "arguments": {}}]}
+    out = orchestration._llm_messages_for_call([{"id": "u", "role": "user", "content": "hi"}, stranded], "sys")
+    assert out == [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"},
+                   {"role": "assistant", "content": "needs approval"}]
