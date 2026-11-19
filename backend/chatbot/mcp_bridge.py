@@ -274,16 +274,23 @@ def resolve_mcp_pending(
     if blocks:
         tool_msg["blocks"] = blocks
 
-    done = conv_store.transition_message(
-        conn, user_id, conversation_id, message_id,
-        expect_status=conv_store.STATUS_EXECUTING,
-        changes={"status": conv_store.STATUS_COMPLETE, "pending_tool": None},
-    )
+    why = "was no longer executing"
+    try:
+        done = conv_store.transition_message(
+            conn, user_id, conversation_id, message_id,
+            expect_status=conv_store.STATUS_EXECUTING,
+            changes={"status": conv_store.STATUS_COMPLETE, "pending_tool": None},
+        )
+    except Exception as e:
+        # Busy or a store error. The tool already ran, so its result must
+        # not be dropped; the row stays "executing", which no approval can
+        # claim again.
+        done, why = None, f"could not be marked complete ({e!r})"
     if done is None:
         # The tool ran, so its result is still appended below.
         _log(
-            f"tool={tool_name} ran but message {message_id!r} was no longer "
-            "executing; appending its result anyway",
+            f"tool={tool_name} ran but message {message_id!r} {why}; "
+            "appending its result anyway",
             "yellow",
         )
     appended.append(tool_msg)

@@ -629,16 +629,23 @@ def confirm_pending_tool(
     )
     if blocks:
         tool_msg["blocks"] = blocks
-    done = conv_store.transition_message(
-        conn, user_id, conv_id, pending_message_id,
-        expect_status=conv_store.STATUS_EXECUTING,
-        changes=resolved(claimed),
-    )
+    why = "was no longer executing"
+    try:
+        done = conv_store.transition_message(
+            conn, user_id, conv_id, pending_message_id,
+            expect_status=conv_store.STATUS_EXECUTING,
+            changes=resolved(claimed),
+        )
+    except Exception as e:
+        # Busy or a store error. The tool already ran, so its result must not
+        # be dropped; the message stays "executing", which no approval can
+        # claim again.
+        done, why = None, f"could not be marked complete ({e!r})"
     if done is None:
         # The tool ran, so the turn still resumes with its result.
         _log.warning(
-            "tool=%s ran but message %r was no longer executing; resuming with its result anyway",
-            name, pending_message_id,
+            "tool=%s ran but message %r %s; resuming with its result anyway",
+            name, pending_message_id, why,
         )
     appended.append(tool_msg)
     return _resume_after_tool_results(conn, user, conv_id, appended)
@@ -663,7 +670,7 @@ def _resume_after_tool_results(
     new_appends = list(appended_so_far)
     _run_loop(conn, user, convo, history, new_appends, model_cfg, system, auto_confirm_safe, conv_id=conv_id)
     # Persist the full new_appends — confirm_pending_tool only persisted the
-    # pending→complete promotion via replace_message, so the tool result
+    # message's status change via transition_message, so the tool result
     # message it passed in `appended_so_far` is NOT yet in the DB. Saving
     # only the suffix (the previous behaviour) left the assistant.tool_calls
     # with no matching tool result on disk, which Azure / OpenAI 400 on the

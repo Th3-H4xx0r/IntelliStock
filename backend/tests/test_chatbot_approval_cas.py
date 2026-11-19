@@ -11,6 +11,7 @@ The helpers below (``conv``, ``_seed``, ``_StoreProxy``, ``_RacingStore``,
 ``_race``) are written for reuse by the approval-path tests (mcp_bridge,
 orchestration).
 """
+import json
 import os
 import sys
 import threading
@@ -471,3 +472,176 @@ def test_llm_history_tolerates_a_stranded_executing_message():
     out = orchestration._llm_messages_for_call([{"id": "u", "role": "user", "content": "hi"}, stranded], "sys")
     assert out == [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"},
                    {"role": "assistant", "content": "needs approval"}]
+
+
+# ── a finishing swap that fails after the tool ran ─────────────────────────
+
+
+class _FinishFails(_StoreProxy):
+    """Lets the first ``replace_if`` (the claim) through and fails every later
+    one, so the swap that marks the message complete after the tool ran
+    cannot land: ``"busy"`` loses each swap (ConversationBusyError after
+    CAS_ATTEMPTS), ``"outage"`` raises UnavailableError."""
+
+    def __init__(self, inner, failure):
+        super().__init__(inner)
+        self._failure = failure
+
+    def replace_if(self, *args, **kwargs):
+        self.replace_if_calls += 1
+        if self.replace_if_calls == 1:
+            return self._inner.replace_if(*args, **kwargs)
+        if self._failure == "busy":
+            return None
+        from db import UnavailableError
+        raise UnavailableError("postgres unavailable")
+
+
+@pytest.mark.parametrize("failure", ["busy", "outage"])
+def test_mcp_result_survives_a_failed_finish_after_the_tool_ran(conv, store, monkeypatch, failure):
+    """The tool already ran (it can be submit_live_command), so a finishing
+    swap that cannot land must not drop its result or tell the user to try
+    again. The message stays "executing", which no approval can claim."""
+    m = _mcp(conv, store, monkeypatch)
+    monkeypatch.setattr(conv, "store", _FinishFails(store, failure))
+    out = m.approve()
+    assert m.calls == [{"qty": 1}]
+    assert [msg["role"] for msg in out] == ["tool"] and m.appended == out
+    assert json.loads(out[0]["content"]) == {"done": True}
+    assert conv.find_message(conv.get_conversation(None, "u1", m.cid), m.mid)["status"] == "executing"
+    with pytest.raises(ValueError, match="no pending tool"):
+        m.approve()
+    assert m.calls == [{"qty": 1}]
+
+
+@pytest.mark.parametrize("failure", ["busy", "outage"])
+def test_confirm_tool_result_survives_a_failed_finish_after_the_tool_ran(conv, store, monkeypatch, failure):
+    """The /confirm-tool twin: the turn still resumes with the tool's result."""
+    m = _confirm(conv, store, monkeypatch)
+    monkeypatch.setattr(conv, "store", _FinishFails(store, failure))
+    out = m.approve()
+    assert m.calls == [{"qty": 1}]
+    assert [(msg["role"], msg["tool_call_id"]) for msg in out] == [("tool", "tc-1")]
+    assert conv.find_message(conv.get_conversation(None, "u1", m.cid), m.mid)["status"] == "executing"
+    with pytest.raises(ValueError, match="no pending tool found on that message"):
+        m.approve()
+    assert m.calls == [{"qty": 1}]
+
+
+# ── append_messages: the trim past the cap claims nothing back ─────────────
+
+
+class _AppendStore(_StoreProxy):
+    """Runs append_messages on either store, and calls ``on_trim_write`` once,
+    just before the first write (``update`` or ``replace_if``) that follows
+    the append: the trim's write, so the callback lands after the trim has
+    read the conversation. On the FakeStore, which has no SQL engine, ``sql``
+    stands in for append_messages' one UPDATE (append the batch, add to
+    message_count, merge the scalars); on Postgres the real statement runs."""
+
+    def __init__(self, inner, on_trim_write=None, **kwargs):
+        super().__init__(inner, **kwargs)
+        self._on_trim_write = on_trim_write
+        self._appended = False
+
+    def sql(self, query, params=()):
+        from db.fake import FakeStore
+
+        self._appended = True
+        if not isinstance(self._inner, FakeStore):
+            return self._inner.sql(query, params)
+        assert query.startswith('UPDATE "ChatbotConversations"')
+        row = self._inner.get("ChatbotConversations", params["id"])
+        old = row.get("messages") or []
+        row["messages"] = old + json.loads(params["msgs"])
+        row["message_count"] = len(old) + params["added"]
+        row.update(json.loads(params["scalars"]))
+        self._inner.replace("ChatbotConversations", params["id"], row)
+        return []
+
+    def _before_trim_write(self):
+        if self._appended and self._on_trim_write is not None:
+            hook, self._on_trim_write = self._on_trim_write, None
+            hook()
+
+    def update(self, *args, **kwargs):
+        self._before_trim_write()
+        return self._inner.update(*args, **kwargs)
+
+    def replace_if(self, *args, **kwargs):
+        self._before_trim_write()
+        return super().replace_if(*args, **kwargs)
+
+
+def _seed_at_cap(conv, store):
+    """_seed, with older chat messages ahead of the pending one up to exactly
+    MAX_MESSAGES_PER_CONVERSATION, so the next append crosses the cap."""
+    cid, mid = _seed(conv, store)
+    filler = [conv.new_message("user" if i % 2 == 0 else "assistant", content=f"m{i}")
+              for i in range(conv.MAX_MESSAGES_PER_CONVERSATION - 1)]
+    msgs = filler + conv.get_conversation(None, "u1", cid)["messages"]
+    store.update(conv.TABLE, cid, {"messages": msgs, "message_count": len(msgs)})
+    return cid, mid
+
+
+def test_trim_past_the_cap_cannot_undo_a_claim(conv, store, monkeypatch):
+    """Past the cap every append trims. The trim used to rewrite every
+    message from its own read, so a claim landing between that read and its
+    write was undone: the message went back to pending, and a later Approve
+    ran the tool a second time."""
+    cid, mid = _seed_at_cap(conv, store)
+    claim = dict(expect_status="pending_confirmation", changes={"status": "executing"})
+    claimed = []
+    monkeypatch.setattr(conv, "store", _AppendStore(store, on_trim_write=lambda: claimed.append(
+        conv.transition_message(None, "u1", cid, mid, **claim))))
+    conv.append_messages(None, "u1", cid, [conv.new_message("assistant", content="late reply")])
+    assert len(claimed) == 1 and claimed[0] is not None
+    doc = conv.get_conversation(None, "u1", cid)
+    cap = conv.MAX_MESSAGES_PER_CONVERSATION
+    assert len(doc["messages"]) == doc["message_count"] == cap
+    assert doc["messages"][0]["content"] == "m1" and doc["messages"][-1]["content"] == "late reply"
+    assert conv.find_message(doc, mid)["status"] == "executing"
+    assert conv.transition_message(None, "u1", cid, mid, **claim) is None
+
+
+def test_an_approval_inside_the_trim_window_runs_the_tool_once(conv, store, monkeypatch):
+    """End to end on the MCP path: an approval that lands while an append is
+    trimming (a chat turn finishing in a long conversation) runs the tool,
+    and a later Approve of the same card is refused."""
+    from chatbot import mcp_bridge
+
+    cid, mid = _seed_at_cap(conv, store)
+    calls = []
+    tool = SimpleNamespace(name="fake_write", safety="write", description="",
+                           executor=lambda ctx, args: calls.append(dict(args)) or {"done": True})
+    monkeypatch.setattr(mcp_bridge, "get_tool", lambda n: tool if n == "fake_write" else None)
+
+    def approve():
+        return mcp_bridge.resolve_mcp_pending(conn=None, user={"id": "u1", "username": "op"},
+                                              conversation_id=cid, message_id=mid, approved=True)
+
+    first = []
+    monkeypatch.setattr(conv, "store", _AppendStore(store, on_trim_write=lambda: first.append(approve())))
+    conv.append_messages(None, "u1", cid, [conv.new_message("assistant", content="late reply")])
+    assert calls == [{"qty": 1}] and [msg["role"] for msg in first[0]] == ["tool"]
+    with pytest.raises(ValueError, match="no pending tool"):
+        approve()
+    assert calls == [{"qty": 1}]
+    doc = conv.get_conversation(None, "u1", cid)
+    assert len(doc["messages"]) == doc["message_count"] == conv.MAX_MESSAGES_PER_CONVERSATION
+    assert conv.find_message(doc, mid)["status"] == "complete"
+    assert [(msg["role"], msg.get("content")) for msg in doc["messages"][-2:]] == [
+        ("assistant", "late reply"), ("tool", json.dumps({"done": True}))]
+
+
+def test_a_trim_that_loses_every_swap_does_not_fail_the_append(conv, store, monkeypatch):
+    """The batch is already written when the trim runs. A trim that loses
+    every swap leaves the conversation over the cap until the next append,
+    instead of failing a write that landed (ConversationBusyError is a
+    ValueError, which the API turns into a 400)."""
+    cid, _ = _seed_at_cap(conv, store)
+    monkeypatch.setattr(conv, "store", _AppendStore(store, always_lose=True))
+    conv.append_messages(None, "u1", cid, [conv.new_message("assistant", content="late reply")])
+    doc = conv.get_conversation(None, "u1", cid)
+    assert len(doc["messages"]) == doc["message_count"] == conv.MAX_MESSAGES_PER_CONVERSATION + 1
+    assert doc["messages"][-1]["content"] == "late reply"

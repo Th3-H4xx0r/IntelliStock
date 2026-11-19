@@ -271,15 +271,25 @@ def append_messages(
          "id": store.coerce_id(TABLE, conv_id)},
     )
 
-    # Refresh and only trim if we crossed the cap. Trimming is non-atomic but
-    # idempotent — the worst-case is two writers each trim once.
+    # Trim only if we crossed the cap. The trim rewrites every message, so it
+    # goes through the compare-and-swap: a plain write from a stale read could
+    # put a claimed ("executing") message back to pending, and a later
+    # approval would run its tool again.
+    def trim(doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        msgs = doc.get("messages") or []
+        if len(msgs) <= MAX_MESSAGES_PER_CONVERSATION:
+            return None
+        doc["messages"] = _trim_to_max(msgs)
+        doc["message_count"] = len(doc["messages"])
+        return doc
+
     fresh = get_conversation(conn, user_id, conv_id)
     if fresh and len(fresh.get("messages") or []) > MAX_MESSAGES_PER_CONVERSATION:
-        trimmed = _trim_to_max(fresh["messages"])
-        store.update(TABLE, conv_id, {
-            "messages": trimmed,
-            "message_count": len(trimmed),
-        })
+        try:
+            _cas_conversation(user_id, conv_id, trim)
+        except ConversationBusyError:
+            # The batch is already written; the next append trims again.
+            pass
         fresh = get_conversation(conn, user_id, conv_id)
     return fresh
 
