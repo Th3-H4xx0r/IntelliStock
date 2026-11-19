@@ -8,6 +8,9 @@ header:
   handed go to the app unchanged, so a human JWT caller sees exactly what an app
   without the gate would show. The one exception the contract mandates: a bearer
   equal to MCP_SERVICE_TOKEN gets the same 401 a bad JWT gets.
+- When MCP_API_PORT equals the public API_PORT (a misconfiguration: serve()
+  then starts no MCP listener), every request is the public listener's. The
+  gate never gates the one listener there is.
 - On the MCP listener (MCP_API_PORT) it is the whole gate. The switch, the token,
   the raw socket peer and the acting user must all check out (anything else is a
   401), then the route's x-mcp policy decides (no policy or "never" is a 403).
@@ -51,6 +54,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import Callable, Mapping
@@ -114,6 +118,8 @@ CLIENT_CLOSED_STATUS = 499
 # What get_current_user answers for a token it cannot decode: the service token
 # on the public listener must look like any other bad bearer.
 _BAD_JWT_DETAIL = "Invalid or expired token"
+# api/main.py's API_PORT default; the gate must agree with it on the public port.
+_PUBLIC_PORT_DEFAULT = "8000"
 
 
 def principal_from_scope(scope: Mapping) -> dict | None:
@@ -176,6 +182,15 @@ def service_auth_failure(scope: Scope, cfg: McpConfig) -> str | None:
     if len(authorizations) != 1 or not hmac.compare_digest(authorizations[0], expected):
         return "token"
     return None
+
+
+def _public_api_port() -> int | None:
+    """The public listener's port: API_PORT, with api/main.py's default (8000).
+    None when it does not parse (main.py would not have started)."""
+    try:
+        return int(os.environ.get("API_PORT", _PUBLIC_PORT_DEFAULT))
+    except ValueError:
+        return None
 
 
 def _bears_service_token(scope: Scope, token: str) -> bool:
@@ -426,9 +441,10 @@ class McpGateMiddleware:
             return
         cfg = self.config_loader()
         server = scope.get("server")
-        if not server or server[1] != cfg.port:
-            # Public listener: the service token is refused like a bad JWT;
-            # everything else reaches the app as the very objects we were given.
+        if not server or server[1] != cfg.port or cfg.port == _public_api_port():
+            # Public listener, or MCP_API_PORT misconfigured onto it: the service
+            # token is refused like a bad JWT; everything else reaches the app as
+            # the very objects we were given.
             if cfg.service_token and _bears_service_token(scope, cfg.service_token):
                 await _respond(scope, receive, send, 401, _BAD_JWT_DETAIL)
                 return

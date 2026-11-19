@@ -137,7 +137,10 @@ def test_serve_refuses_mcp_on_the_public_port(monkeypatch, log):
     public = _public(port=8012)
     serve(tiny_app, public, environ={**MCP_ON, "MCP_API_PORT": "8012"})
     assert ran == [public]
-    log.error.assert_called_once_with("MCP_API_PORT must differ from API_PORT; MCP listener off")
+    log.error.assert_called_once()
+    message, *ports = log.error.call_args.args
+    assert ports == [8012, 8012] and "MCP_API_PORT" in message and "API_PORT" in message
+    assert "MCP listener off" in message and "public" in message
 
 
 def test_serve_runs_both_when_enabled(monkeypatch, log):

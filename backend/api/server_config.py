@@ -202,8 +202,9 @@ def serve(app, public_config: uvicorn.Config, *, environ: Optional[Mapping[str, 
     """Serve the public listener, plus the MCP-only listener when MCP is usable.
 
     MCP off, or on without a usable token or CIDR: the public listener alone,
-    exactly as run_server. MCP_API_PORT equal to the public port: an ERROR and
-    the public listener alone. Otherwise both, in one event loop, keeping
+    exactly as run_server. MCP_API_PORT equal to the public port: one ERROR
+    naming both ports and the public listener alone (the gate then treats every
+    request on it as public). Otherwise both, in one event loop, keeping
     run_server's exit codes: SIGINT ends quietly, and 3 when the public listener
     never started.
     """
@@ -217,7 +218,8 @@ def serve(app, public_config: uvicorn.Config, *, environ: Optional[Mapping[str, 
         run_server(public_config)
         return
     if cfg.port == public_config.port:
-        _log.error("MCP_API_PORT must differ from API_PORT; MCP listener off")
+        _log.error("MCP_API_PORT %d equals API_PORT %d: MCP listener off, and every request on "
+                   "that port is public", cfg.port, public_config.port)
         run_server(public_config)
         return
     public = uvicorn.Server(public_config)

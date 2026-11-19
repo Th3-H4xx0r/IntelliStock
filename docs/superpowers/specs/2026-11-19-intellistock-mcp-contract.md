@@ -48,8 +48,9 @@ live trading and start LLM spend, so every MCP call to it waits for approval.
   peer and refuses an IPv4-mapped IPv6 address (::ffff:172.31.250.7), which a
   dual-stack bind would hand it. The listener starts only when MCP_ENABLED is true,
   MCP_SERVICE_TOKEN is at least 32 bytes and MCP_ALLOWED_CIDR parses. MCP_API_PORT
-  must differ from API_PORT: when they are equal, the API logs an ERROR and starts
-  the public listener alone. :8012 runs with lifespan off (startup hooks run once, on
+  must differ from API_PORT: when they are equal, the API logs one ERROR naming both
+  ports and starts the public listener alone, and the gate treats every request on
+  that port as public (the service token there gets the bad-JWT 401). :8012 runs with lifespan off (startup hooks run once, on
   :8011), sends no Server header, and stops when the public listener stops.
 - Principal dict returned by get_current_user for MCP requests:
   {"id": <user id>, "username": <username>, "via": "mcp", "client": <X-MCP-Client or "jarvis">}

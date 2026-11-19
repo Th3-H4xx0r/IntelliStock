@@ -69,6 +69,33 @@ def test_service_token_on_public_listener_is_401_even_when_the_switch_is_off(mon
     assert calls["count"].get("probe_read", 0) == 0
 
 
+@pytest.mark.parametrize("enabled", ["true", "false"])
+def test_mcp_port_equal_to_the_public_port_leaves_every_request_public(monkeypatch, store, enabled):
+    """MCP_API_PORT == API_PORT is a misconfiguration: serve() starts no MCP
+    listener, and the gate must not gate the one listener there is, or every
+    human would get a 401. Every request on that port takes the public path."""
+    import interactive_utils
+    from api import main
+    mcp_env(monkeypatch, MCP_ENABLED=enabled, MCP_API_PORT="8011")
+    monkeypatch.setenv("API_PORT", "8011")
+    monkeypatch.setattr(interactive_utils, "ensure_instances_table", lambda conn=None: None)
+    store.insert("Instances", {"id": "alpaca-main", "runCommand": True})
+    main.app.dependency_overrides[main.conn_dependency] = lambda: None
+    try:
+        # From inside MCP_ALLOWED_CIDR: without the port rule the second call
+        # would be a fully authenticated MCP call, and the first a 401.
+        client = TestClient(main.app, base_url="http://api:8011", client=(PEER_IN, 50000))
+        human = client.get("/instances", headers={"Authorization": f"Bearer {human_token(monkeypatch)}"})
+        assert human.status_code == 200
+        assert [row["id"] for row in human.json()["instances"]] == ["alpaca-main"]
+        service = client.get("/instances", headers={"Authorization": f"Bearer {MCP_TOKEN}",
+                                                     "X-MCP-Acting-User": "u-op"})
+        assert service.status_code == 401 and service.json() == {"detail": "Invalid or expired token"}
+    finally:
+        main.app.dependency_overrides.pop(main.conn_dependency, None)
+    assert list(store.run("McpAudit")) == []                      # the gate saw no MCP call
+
+
 def test_mcp_headers_are_ignored_on_public_listener(monkeypatch):
     app, _ = make_probe_app()
     res = public_client(app).get("/whoami", headers={"Authorization": f"Bearer {human_token(monkeypatch)}",
