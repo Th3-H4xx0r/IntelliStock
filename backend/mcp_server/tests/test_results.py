@@ -8,6 +8,7 @@ from planted_secrets, so none is a literal in the repository.
 import copy
 import json
 import random
+import re
 import time
 import types as pytypes
 from pathlib import Path
@@ -672,3 +673,34 @@ def test_sanitize_strips_format_tag_and_smuggling_characters():
     visible = "caf\u00e9 \u6f22 \u0628 " + chr(0x1F600) + "\ufe0f"
     assert sanitize_text(visible) == visible
     assert redact("key AKIA" + chr(0xE0041) + "IOSFODNN7EXAMPLE") == "key " + REDACTED
+
+
+# --- review round 2: bounded, linear key-name classification ---------------
+
+@pytest.mark.parametrize("name, secret", [
+    ("A" * 200_000 + "KEY", False),
+    ("A" * 200_000 + "_API_KEY", True),
+    ("Ab" * 100_000 + "ApiKey", True),
+])
+def test_long_names_are_classified_in_linear_time(name, secret):
+    started = time.monotonic()
+    redact(name + "=x")
+    out = redact({name: "value-123456"})
+    assert time.monotonic() - started < 0.5
+    assert (list(out.values()) == [REDACTED]) is secret
+    assert is_secret_key(name) is secret
+
+
+def test_long_secret_names_redact_their_free_text_value():
+    assert redact("A" * 200_000 + "_API_KEY=abcdef123456").endswith("_API_KEY=" + REDACTED)
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_linear_camel_split_matches_the_old_regexes(seed):
+    from mcp_server.results import _key_forms
+    acronym, word = re.compile(r"([A-Z]+)([A-Z][a-z])"), re.compile(r"([a-z0-9])([A-Z])")
+    rng = random.Random(seed)
+    for _ in range(2000):
+        name = "".join(rng.choice("AaBbZz09_-") for _ in range(rng.randint(1, 16)))
+        expected = word.sub(r"\1_\2", acronym.sub(r"\1_\2", name)).replace("-", "_").lower()
+        assert _key_forms(name)[-1] == expected, name

@@ -102,9 +102,12 @@ _JWT_MIN_SEGMENT = 8
 _WORD_CHAR = re.compile(r"\w")
 _PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]+-----")
 _PEM_END = re.compile(r"-----END [A-Z0-9 ]+-----")
-_CAMEL_ACRONYM = re.compile(r"([A-Z]+)([A-Z][a-z])")  # APIKey -> API_Key
-_CAMEL_WORD = re.compile(r"([a-z0-9])([A-Z])")  # apiKey -> api_Key
-_CACHED_NAME_CHARS = 256
+# Zero-width, fixed-width lookarounds: a "_" goes in at each match, in one linear pass.
+_CAMEL_ACRONYM = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")  # APIKey -> API_Key
+_CAMEL_WORD = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")  # apiKey -> api_Key
+# is_secret_key reads only a name's last MAX_KEY_NAME_CHARS characters. Every secret name and
+# suffix is far shorter and sits at the end, so the answer is the same, and the work per name is bounded.
+MAX_KEY_NAME_CHARS = 128
 
 
 def _invisible_class() -> str:
@@ -154,7 +157,7 @@ RETRY_READ = "Safe to retry."
 def _key_forms(name: str) -> tuple[str, ...]:
     """The lower-cased name and its snake_case normalisation, hyphens as underscores in both."""
     lowered = name.lower().replace("-", "_")
-    normalized = _CAMEL_WORD.sub(r"\1_\2", _CAMEL_ACRONYM.sub(r"\1_\2", name)).replace("-", "_").lower()
+    normalized = _CAMEL_WORD.sub("_", _CAMEL_ACRONYM.sub("_", name)).replace("-", "_").lower()
     return (lowered,) if normalized == lowered else (lowered, normalized)
 
 
@@ -168,9 +171,10 @@ _secret_by_forms_cached = functools.lru_cache(maxsize=4096)(_secret_by_forms)
 
 def is_secret_key(name: str) -> bool:
     """True when either form of the name is an exact secret name or ends with a secret
-    suffix, and that form is not in NOT_SECRET_KEY_NAMES. Short names are cached: free
-    text repeats them, and _redact_key_values asks once per candidate."""
-    return _secret_by_forms_cached(name) if len(name) <= _CACHED_NAME_CHARS else _secret_by_forms(name)
+    suffix, and that form is not in NOT_SECRET_KEY_NAMES. Reads the last
+    MAX_KEY_NAME_CHARS characters, and caches the answer: free text repeats names, and
+    _redact_key_values asks once per candidate."""
+    return _secret_by_forms_cached(name[-MAX_KEY_NAME_CHARS:])
 
 
 def sanitize_text(text: str) -> str:
