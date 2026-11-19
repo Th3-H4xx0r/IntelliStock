@@ -1,0 +1,5 @@
+# Test-only dependencies; compile with the same command as requirements.in (see there).
+-r requirements.in
+pytest==9.2.0
+pytest-asyncio==1.5.0
+pyyaml>=6.0
