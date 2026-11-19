@@ -7,7 +7,8 @@ classes that both modules raise.
 
 Used by:
   * backend/api/main.py — the ``POST /ollama/list-models`` endpoint
-  * backend/llm_utils.py — ``_call_ollama`` imports the exception classes
+  * backend/llm_utils.py — ``_call_ollama`` imports the exception classes;
+    ``_make_ollama_sync_client`` uses ``NoAmbientAuthorization``
 """
 
 from __future__ import annotations
@@ -41,6 +42,22 @@ def _auth_headers(api_key: Optional[str]) -> dict[str, str]:
     if api_key:
         return {"Authorization": f"Bearer {api_key}"}
     return {}
+
+
+class NoAmbientAuthorization(httpx.Auth):
+    """Drop any ``Authorization`` header from each request before it is sent.
+
+    The ollama SDK copies ``OLLAMA_API_KEY`` from the environment into a
+    client's default headers whenever the caller passes no key. A caller
+    that must not send the server's key to a host someone else chose passes
+    ``auth=NoAmbientAuthorization()`` to the client. httpx runs the auth
+    flow after merging the client's headers into the request, so the header
+    never leaves. Works for both ``httpx.Client`` and ``httpx.AsyncClient``.
+    """
+
+    def auth_flow(self, request: httpx.Request):
+        request.headers.pop("Authorization", None)
+        yield request
 
 
 _CONTEXT_LENGTH_SUFFIX = ".context_length"

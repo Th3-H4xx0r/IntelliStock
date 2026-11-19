@@ -4489,15 +4489,29 @@ def _mark_ollama_pair_warm(base_url: str, model: str) -> None:
         _ollama_warm_pairs.add((base_url, model))
 
 
-def _make_ollama_sync_client(base_url: str, api_key: str | None, timeout: float):
+def _make_ollama_sync_client(
+    base_url: str,
+    api_key: str | None,
+    timeout: float,
+    *,
+    allow_ambient_key: bool = True,
+):
     """Thin wrapper around ``ollama.Client`` so tests can patch construction.
 
     Always returns a synchronous client — the dispatcher path is sync.
     The async client lives in ``ollama_client.py`` for discovery calls.
+
+    With a blank ``api_key`` the SDK sends ``OLLAMA_API_KEY`` from the
+    environment. ``allow_ambient_key=False`` stops that, so the request
+    carries no ``Authorization`` header; an explicit key is still sent.
     """
     from ollama import Client
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    return Client(host=base_url, headers=headers, timeout=timeout)
+    extra: dict[str, object] = {}
+    if not allow_ambient_key and not api_key:
+        from ollama_client import NoAmbientAuthorization
+        extra["auth"] = NoAmbientAuthorization()
+    return Client(host=base_url, headers=headers, timeout=timeout, **extra)
 
 
 def _normalize_ollama_think(value):
@@ -4611,6 +4625,7 @@ def _call_ollama(
     reasoning_effort: str = "",   # accepted, ignored (model-specific)
     keep_alive: str | None = None,
     think: str | None = None,
+    allow_ambient_key: bool = True,
 ) -> str:
     """Plain-text chat against an Ollama host.
 
@@ -4670,7 +4685,9 @@ def _call_ollama(
     for attempt in range(max_retries + 1):
         timeout = _resolve_ollama_timeout(base_url, model, timeout_sec)
         try:
-            client = _make_ollama_sync_client(base_url, api_key, timeout)
+            client = _make_ollama_sync_client(
+                base_url, api_key, timeout, allow_ambient_key=allow_ambient_key,
+            )
             resp = client.chat(**chat_kwargs)
         except ResponseError as e:
             status = e.status_code or 0
@@ -6897,6 +6914,7 @@ def call_llm_by_provider(
             response_mime_type=response_mime_type,
             keep_alive=resolved.get("ollama_keep_alive"),
             think=resolved.get("ollama_think"),
+            allow_ambient_key=bool(resolved.get("ollama_allow_ambient_key", True)),
         )
     elif p == "bedrock":
         _result = _call_bedrock(
