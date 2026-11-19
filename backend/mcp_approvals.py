@@ -17,9 +17,16 @@ body_sha256.
 A human sees only their own approvals; an MCP principal sees only the ones its
 own client created for its acting user. Anything else, a malformed id included,
 reads as not found.
+
+An approval device is a P-256 signing key the human enrols from the iOS app
+(register_device). It can sign a decision only from active_at, 600 s after
+enrolment, and every enrolment alerts Discord (alert_device_registered), so a
+key added from a stolen session is announced before it can approve anything
+and can be revoked in that window. A device is visible only to its own user.
 """
 from __future__ import annotations
 
+import base64
 import logging
 import re
 import threading
@@ -28,7 +35,11 @@ import uuid
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
 import apns_sender
+import notifications
 from db import P, store
 from mcp_audit import redact_secrets
 from mcp_policy import McpConfig, canonical_request_sha256, iso_utc, parse_iso_utc, utc_now
@@ -287,3 +298,135 @@ def list_visible(*, viewer: dict, status: str, limit: int, cfg: McpConfig,
     newest = store.order_by(store.filter(APPROVALS_TABLE, match), index="created_at", desc=True)
     rows = [refresh_lazily(row, cfg=cfg, now=now) for row in store.run(store.limit(newest, limit))]
     return [row for row in rows if status == "all" or row.get("status") == "pending"]
+
+
+# -- approval devices -----------------------------------------------------------
+
+DEVICES_TABLE = "McpApprovalDevices"
+DEVICE_ACTIVATION_DELAY_S = 600
+DEVICE_NAME_MAX_CHARS = 64
+DEVICE_ALERT_TITLE = "MCP approval device registered"
+
+_P256_POINT_BYTES = 65            # X9.62 uncompressed: 0x04, then X and Y (32 bytes each)
+_PUBLIC_KEY_MAX_CHARS = 128       # 65 bytes are 88 base64 characters; refuse a huge string unread
+_BAD_PUBLIC_KEY = "public_key must be base64 of a 65-byte uncompressed P-256 point"
+
+
+def decode_public_key(b64: str) -> ec.EllipticCurvePublicKey:
+    """The P-256 key in base64 of an X9.62 uncompressed point (65 bytes, 0x04 first).
+
+    Strict base64 (standard alphabet, no whitespace). ValueError on anything
+    else, a point that is not on the curve included.
+    """
+    if not isinstance(b64, str) or len(b64) > _PUBLIC_KEY_MAX_CHARS:
+        raise ValueError(_BAD_PUBLIC_KEY)
+    try:
+        raw = base64.b64decode(b64, validate=True)    # binascii.Error is a ValueError
+    except ValueError:
+        raise ValueError(_BAD_PUBLIC_KEY) from None
+    if len(raw) != _P256_POINT_BYTES or raw[0] != 0x04:
+        raise ValueError(_BAD_PUBLIC_KEY)
+    try:
+        return ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), raw)
+    except ValueError:
+        raise ValueError(_BAD_PUBLIC_KEY) from None
+
+
+def _device_name(name: object) -> str:
+    if not isinstance(name, str):
+        raise ValueError("name must be a string")
+    name = name.strip()
+    if not 1 <= len(name) <= DEVICE_NAME_MAX_CHARS:
+        raise ValueError(f"name must be 1-{DEVICE_NAME_MAX_CHARS} characters")
+    return name
+
+
+def register_device(*, user: dict, name: str, public_key_b64: str, now: datetime | None = None) -> dict:
+    """Enrol a signing key for the user and return the row; it can approve from
+    active_at = now + DEVICE_ACTIVATION_DELAY_S. ValueError on a bad name or key,
+    and nothing is stored then. The key is stored re-encoded from the point."""
+    name = _device_name(name)
+    point = decode_public_key(public_key_b64).public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    now = now or utc_now()
+    row = {
+        "id": uuid.uuid4().hex,
+        "user_id": user["id"],
+        "name": name,
+        "public_key": base64.b64encode(point).decode("ascii"),
+        "created_at": iso_utc(now),
+        "active_at": iso_utc(now + timedelta(seconds=DEVICE_ACTIVATION_DELAY_S)),
+        "revoked_at": None,
+    }
+    result = store.insert(DEVICES_TABLE, row)
+    if getattr(result, "errors", 0):
+        raise RuntimeError("mcp: device insert rejected")
+    return row
+
+
+def device_public(row: dict) -> dict:
+    """The contract's Device object: exactly device_id (the row id), name, created_at
+    and active_at, so user_id, the key and revoked_at stay server-side."""
+    return {"device_id": row.get("id"), "name": row.get("name"), "created_at": row.get("created_at"),
+            "active_at": row.get("active_at")}
+
+
+def list_devices(user_id: str) -> list[dict]:
+    """The user's devices that are not revoked, oldest first; one still waiting
+    for active_at is listed too."""
+    if not user_id:
+        return []
+    rows = store.run(store.filter(DEVICES_TABLE, {"user_id": user_id}))
+    live = [row for row in rows if row.get("revoked_at") is None]
+    # Bytewise, like COLLATE "C": the stamps are fixed-width, so this is chronological.
+    return sorted(live, key=lambda row: (row.get("created_at") or "", row.get("id") or ""))
+
+
+def _own_device(user_id: str, device_id: str) -> dict | None:
+    """The row when the id is well formed (device ids share the approval-id
+    shape, contract §5), it exists, it is the user's and it is not revoked."""
+    if not user_id or not is_approval_id(device_id):
+        return None
+    row = store.get(DEVICES_TABLE, device_id)
+    if row is None or row.get("user_id") != user_id or row.get("revoked_at") is not None:
+        return None
+    return row
+
+
+def revoke_device(*, user_id: str, device_id: str, now: datetime | None = None) -> bool:
+    """Stamp revoked_at on the user's device. False when the id is malformed or
+    unknown, the device is another user's, or it is already revoked."""
+    if _own_device(user_id, device_id) is None:
+        return False
+    now = now or utc_now()
+    result = store.update(DEVICES_TABLE, device_id, {"revoked_at": iso_utc(now)})
+    if getattr(result, "errors", 0):
+        # A revoke the user believes happened must not leave the key able to sign.
+        raise RuntimeError("mcp: device revoke rejected")
+    return True
+
+
+def active_device(*, user_id: str, device_id: str, now: datetime | None = None) -> dict | None:
+    """The row when it is the user's, not revoked, and active_at <= now; an
+    unreadable active_at counts as not active (fail closed)."""
+    row = _own_device(user_id, device_id)
+    if row is None:
+        return None
+    active_at = _stamp(row.get("active_at"))
+    if active_at is None or (now or utc_now()) < active_at:
+        return None
+    return row
+
+
+def alert_device_registered(row: dict, username: str) -> None:
+    """Announce an enrolment on Discord; best-effort, never raises.
+
+    The name and username are flattened like a push summary, so a name cannot
+    fake a line of the alert.
+    """
+    body = (f"MCP APPROVAL DEVICE registered: '{_text(row.get('name'))}' for {_text(username)}; "
+            f"it can approve from {row.get('active_at')}. If this was not you, revoke it in Settings now.")
+    try:
+        notifications.notify(category="other", instance_id="mcp", title=DEVICE_ALERT_TITLE, body=body,
+                             discord_channel="notifications")
+    except Exception as exc:
+        _log.warning("mcp: device registration alert failed (%s)", type(exc).__name__)

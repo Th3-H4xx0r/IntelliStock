@@ -4,10 +4,15 @@ A plain module the tests import by name, like ``live_order_task8_helpers``.
 """
 from __future__ import annotations
 
+import base64
 import importlib
 import os
 import uuid
 from datetime import datetime, timezone
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from mcp_policy import McpConfig
 
@@ -110,6 +115,23 @@ def human_token(monkeypatch, user_id: str = "u-op", username: str = "operator") 
 def human_headers(monkeypatch) -> dict:
     """Authorization for the operator's human session; tests bind it to HUMAN."""
     return {"Authorization": f"Bearer {human_token(monkeypatch)}"}
+
+
+def p256_keypair() -> tuple[ec.EllipticCurvePrivateKey, str]:
+    """A fresh approval-device key: the private key, and the public key as the iOS
+    app enrols it (base64 of the 65-byte X9.62 uncompressed point)."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    raw = key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    return key, base64.b64encode(raw).decode("ascii")
+
+
+def sign_decision(private_key: ec.EllipticCurvePrivateKey, approval_id: str, body_sha256: str,
+                  decision: str, ts: int) -> str:
+    """The decision signature the iOS app sends: base64 DER ECDSA P-256 SHA-256 over
+    UTF-8 f"{approval_id}|{body_sha256}|{decision}|{ts}" (contract §5). Built here
+    from the contract, not from mcp_approvals, so it checks the API independently."""
+    message = f"{approval_id}|{body_sha256}|{decision}|{ts}".encode("utf-8")
+    return base64.b64encode(private_key.sign(message, ec.ECDSA(hashes.SHA256()))).decode("ascii")
 
 
 def IDEM() -> dict:  # noqa: N802 - reads as a constant at the call site: headers=IDEM()
