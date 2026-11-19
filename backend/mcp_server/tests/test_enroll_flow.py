@@ -579,6 +579,30 @@ async def test_api_outage_or_throttle_counts_nothing(browser, deps, settings, fa
     assert (_row(db, path)["stage"], _failures(db), _events(db)) == ("password", [], [])
 
 
+async def test_api_refusing_this_server_counts_nothing(browser, deps, settings, fake, db):
+    # The gate's own 401 (MCP_ENABLED unset, a service token mismatch, a peer outside MCP_ALLOWED_CIDR) and any
+    # 403 say nothing about the password: more refusals than a lockout takes, and nothing is counted.
+    path = _link(deps)
+    await _open(browser, settings, path)
+    fake.service_enabled = False
+    for attempt in range(6):
+        if attempt == 3:
+            fake.service_enabled = True
+            fake.set_route("POST", VERIFY_PASSWORD_PATH, 403, {"detail": "mcp: operation not available"})
+        response = await _password(browser, settings)
+        assert response.status_code == 503, attempt
+        assert ("Sign-in is unavailable because this server is misconfigured: IntelliStock refused its "
+                "credentials. Your password was not checked.") in response.text
+        assert "That password was not accepted." not in response.text
+    assert (_row(db, path)["stage"], _failures(db), _events(db)) == ("password", [], [])
+    assert deps.throttle.check("operator") is None
+
+    fake.clear_route("POST", VERIFY_PASSWORD_PATH)
+    response = await _password(browser, settings)
+    assert response.status_code == 303, response.text
+    assert _row(db, path)["stage"] == "passkey"
+
+
 async def test_totp_qr_shown_once(browser, deps, settings, device, clock, db):
     path = await _to_passkey(browser, deps)
     assert (await _register(browser, settings, device)).status_code == 200

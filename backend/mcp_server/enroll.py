@@ -64,7 +64,7 @@ from mcp_server.admin import ENROLL_TOKEN_PREFIX
 from mcp_server.api_client import PasswordCheck
 from mcp_server.config import ENROLL_TTL_S
 from mcp_server.crypto import hash_token, new_token
-from mcp_server.login import BAD_REQUEST, UNAVAILABLE, locked_message
+from mcp_server.login import BAD_REQUEST, MISCONFIGURED, UNAVAILABLE, locked_message
 from mcp_server.oauth_provider import MAX_BODY_BYTES
 from mcp_server.pages import (
     WebDeps,
@@ -343,7 +343,7 @@ class _EnrollPages:
         if check.outcome == "throttled":
             return self._error_page(429, locked_message(check.retry_after_s))
         if check.outcome == "unavailable":
-            return self._error_page(503, UNAVAILABLE)
+            return self._error_page(503, MISCONFIGURED if check.misconfigured else UNAVAILABLE)
         if check.outcome == "ok":
             # The API's spelling of the username is the one the users row keeps.
             with self._deps.db.tx() as conn:

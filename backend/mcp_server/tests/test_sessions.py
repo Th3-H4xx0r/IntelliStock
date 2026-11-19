@@ -69,6 +69,13 @@ def _refresh(service, refresh_token):
     return None if found is None else service.rotate(found)
 
 
+def test_issued_pair_repr_hides_both_tokens():
+    pair = IssuedPair(access_token="eyJ.access-token-value", refresh_token="mcprt_refresh-token-value",
+                      expires_in=ACCESS_TOKEN_TTL_S, scope=SCOPE)
+    assert "access-token-value" not in repr(pair) and "refresh-token-value" not in repr(pair)
+    assert "expires_in=900" in repr(pair)
+
+
 def test_start_stores_only_hashes(service, db, settings):
     family_id, first = service.start(user_id=USER, client_id=CLIENT)
     assert first.refresh_token.startswith("mcprt_")

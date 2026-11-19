@@ -25,7 +25,14 @@ _LEVELS = {"critical": logging.CRITICAL, "error": logging.ERROR, "warning": logg
            "debug": logging.DEBUG, "trace": logging.DEBUG}
 
 
+def _quiet_http_client_logs() -> None:
+    """httpx logs every request URL at INFO, tool paths and query arguments included."""
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def main() -> None:
+    _quiet_http_client_logs()
     try:
         settings = load_settings(os.environ)
     except SettingsError as exc:

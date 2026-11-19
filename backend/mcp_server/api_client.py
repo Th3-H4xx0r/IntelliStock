@@ -2,12 +2,16 @@
 
 Every request carries the service token, X-MCP-Client and a fresh uuid4
 correlation id; the acting user and Idempotency-Key are added when given.
+verify-password's own 401, "invalid credentials", is the one answer that means a
+wrong password; any other 401 or 403 is the API refusing this server, which is a
+misconfiguration and never counts against the person signing in.
 Redirects are never followed (a Location could point anywhere, and the service
 token would follow it), proxies from the environment are ignored, and a body
 past API_MAX_RESPONSE_BYTES is abandoned mid-stream. Transport failures surface
 as ApiUnavailable carrying the correlation id, so a tool result can quote it.
 """
 import json
+import logging
 import re
 import types
 import uuid
@@ -23,11 +27,21 @@ from mcp_server.config import API_MAX_RESPONSE_BYTES, CLIENT_HEADER_VALUE
 IDEMPOTENCY_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 _PATH_PARAM = re.compile(r"\{([^{}/]+)\}")
 _RESERVED_SEGMENTS = ("", ".", "..")
+# A "/" or a backslash, raw or percent-encoded: uvicorn decodes the path before Starlette routes it,
+# so even %2F would split the value into two segments and reach a different route.
+_SEGMENT_BREAK = re.compile(r"[/\\]|%2f|%5c", re.IGNORECASE)
 
 OPENAPI_PATH = "/internal/mcp/openapi.json"
 HEALTH_PATH = "/health"
 VERIFY_PASSWORD_PATH = "/internal/mcp/verify-password"
 AUDIT_EVENT_PATH = "/internal/mcp/audit-event"
+# verify-password's wrong-password body (contract section 4). The gate's own 401 is
+# {"detail": "mcp: unauthenticated"} (contract section 2).
+INVALID_CREDENTIALS_DETAIL = "invalid credentials"
+SERVICE_REFUSED_HINT = ("the api refused this server: check the api's MCP_ENABLED, that MCP_SERVICE_TOKEN is the same "
+                        "on both services, and that MCP_ALLOWED_CIDR admits this container (172.31.250.10/32)")
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -46,6 +60,8 @@ class PasswordCheck:
     user_id: Optional[str] = None
     username: Optional[str] = None
     retry_after_s: Optional[int] = None
+    # "unavailable" because the API refused this server (a 401 other than "invalid credentials", or a 403).
+    misconfigured: bool = False
 
 
 class ApiUnavailable(Exception):
@@ -67,8 +83,9 @@ class PathParamError(ValueError):
 def build_path(template: str, values: Mapping[str, Any]) -> str:
     """Fill each {name} with its value percent-encoded as a single segment.
 
-    httpx removes dot segments, so a raw "..", "." or "a/b" would reach a
-    different route; those are rejected or encoded before any request is built.
+    httpx removes dot segments, so a raw ".." or "." would reach a different
+    route; and uvicorn decodes the path before routing, so an encoded "/" would
+    too. Those values are rejected before any request is built.
     """
     def substitute(match: "re.Match[str]") -> str:
         name = match.group(1)
@@ -80,6 +97,8 @@ def build_path(template: str, values: Mapping[str, Any]) -> str:
         text = str(value)
         if text in _RESERVED_SEGMENTS:
             raise PathParamError(f"path parameter '{name}' must not be empty, '.' or '..'")
+        if _SEGMENT_BREAK.search(text):
+            raise PathParamError(f"path parameter '{name}' must not contain '/' or '\\', encoded or not")
         return quote(text, safe="")
 
     return _PATH_PARAM.sub(substitute, template)
@@ -111,6 +130,11 @@ def _parse_json(text: str) -> Any:
         return None
 
 
+def _detail(response: ApiResponse) -> Any:
+    """The body's "detail", or None when the body is not a JSON object."""
+    return response.body.get("detail") if isinstance(response.body, dict) else None
+
+
 def _retry_after(response: ApiResponse) -> Optional[int]:
     """retry_after_s from the body, else a delta-seconds Retry-After header."""
     body = response.body
@@ -119,7 +143,7 @@ def _retry_after(response: ApiResponse) -> Optional[int]:
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             return value
     header = response.headers.get("retry-after", "").strip()
-    return int(header) if header.isdigit() else None
+    return int(header) if header.isascii() and header.isdigit() else None
 
 
 class ApiClient:
@@ -203,8 +227,12 @@ class ApiClient:
             user_id, name = resp.body.get("user_id"), resp.body.get("username")
             if isinstance(user_id, str) and isinstance(name, str):
                 return PasswordCheck("ok", user_id=user_id, username=name)
-        elif resp.status == 401:
+        elif resp.status == 401 and _detail(resp) == INVALID_CREDENTIALS_DETAIL:
             return PasswordCheck("invalid")
+        elif resp.status in (401, 403):
+            _log.warning("verify-password answered %d (correlation id %s): %s",
+                         resp.status, resp.correlation_id, SERVICE_REFUSED_HINT)
+            return PasswordCheck("unavailable", misconfigured=True)
         elif resp.status == 429:
             return PasswordCheck("throttled", retry_after_s=_retry_after(resp))
         return PasswordCheck("unavailable")

@@ -407,6 +407,8 @@ async def test_main_runs_uvicorn_with_fixed_options(app_env, monkeypatch):
     monkeypatch.setattr(entry, "build_deps", lambda settings: built.append(real_build_deps(settings)) or built[-1])
     entry.main()
     try:
+        # httpx logs each request URL at INFO, tool paths and query arguments included.
+        assert [logging.getLogger(name).level for name in ("httpx", "httpcore")] == [logging.WARNING] * 2
         ((app, options),) = runs
         assert options == {"host": "0.0.0.0", "port": 8090, "proxy_headers": False, "server_header": False,
                            "access_log": False, "log_level": "warning"}

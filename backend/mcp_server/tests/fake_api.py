@@ -20,6 +20,9 @@ DEFAULT_USERS = {"operator": ("correct horse", "u-123")}  # username -> (passwor
 AUDIT_EVENTS = frozenset({"login_ok", "login_failed", "passkey_failed", "totp_failed", "lockout",
                           "refresh_reuse_revoked", "session_revoked", "enrolled", "disabled", "enabled"})
 DEFAULT_OPENAPI = {"openapi": "3.1.0", "info": {"title": "IntelliStock API", "version": "test"}, "paths": {}}
+# The gate's own refusal on :8012 (contract section 2): MCP_ENABLED unset, a service token mismatch, or a
+# peer outside MCP_ALLOWED_CIDR. verify-password's wrong password is a different 401, "invalid credentials".
+UNAUTHENTICATED = {"detail": "mcp: unauthenticated"}
 
 OPENAPI_PATH = "/internal/mcp/openapi.json"
 VERIFY_PASSWORD_PATH = "/internal/mcp/verify-password"
@@ -68,6 +71,8 @@ class FakeApi:
         self.requests: list[httpx.Request] = []
         self.audit_events: list[dict] = []
         self.users = dict(DEFAULT_USERS if users is None else users)
+        # False is the api with MCP_ENABLED unset: the gate refuses every request, the right token included.
+        self.service_enabled = True
         self._routes: dict[tuple[str, str], Handler] = {}
         self._openapi: dict = {}
         self.set_openapi(DEFAULT_OPENAPI if openapi is None else openapi)
@@ -93,6 +98,10 @@ class FakeApi:
                 return _response(status, body, headers)
         self._routes[(method.upper(), path)] = handler
 
+    def clear_route(self, method: str, path: str) -> None:
+        """Drop a set_route override, so the built-in route answers again."""
+        self._routes.pop((method.upper(), path), None)
+
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handle)
 
@@ -100,14 +109,15 @@ class FakeApi:
         return ApiClient(BASE_URL, SERVICE_TOKEN, transport=self.transport())
 
     def _authorized(self, request: httpx.Request) -> bool:
-        return (request.headers.get("authorization") == "Bearer " + SERVICE_TOKEN
+        return (self.service_enabled
+                and request.headers.get("authorization") == "Bearer " + SERVICE_TOKEN
                 and request.headers.get("x-mcp-client") == "jarvis"
                 and _is_uuid4(request.headers.get("x-mcp-correlation-id")))
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         if not self._authorized(request):
-            return _response(401, {"detail": "Not authenticated"})
+            return _response(401, UNAUTHENTICATED)
         key = (request.method, request.url.raw_path.split(b"?")[0].decode("ascii"))
         if key in self._routes:
             return self._routes[key](request)

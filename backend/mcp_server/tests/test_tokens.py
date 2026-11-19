@@ -1,7 +1,9 @@
 """Signing keys, access tokens and the resource-server verifier."""
 import base64
 import json
+import logging
 import os
+import sqlite3
 import re
 import uuid
 
@@ -157,6 +159,23 @@ def test_hand_signed_baseline_is_accepted(forge, verifier):
 def test_wrong_audience_rejected(forge, verifier, settings):
     assert verifier.verify(forge(aud=settings.public_base)) is None
     assert verifier.verify(forge(aud=settings.resource_url + "/")) is None
+    # The issuer writes aud as one string; a list, even one holding the /mcp URL, is not that token.
+    assert verifier.verify(forge(aud=[settings.resource_url])) is None
+    assert verifier.verify(forge(aud=[settings.resource_url, "https://other.example"])) is None
+
+
+def test_server_side_fault_is_logged_by_class_only(forge, verifier, keyring, monkeypatch, caplog):
+    token = forge()
+
+    def broken(kid):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(keyring, "public_key", broken)
+    with caplog.at_level(logging.WARNING, logger="mcp_server.tokens"):
+        assert verifier.verify(token) is None
+        assert verifier.verify("not-a-jwt") is None  # a bad token is the caller's problem, not logged
+    assert [record.getMessage() for record in caplog.records] == [
+        "access token check failed on a server-side error (OperationalError)"]
 
 
 def test_wrong_issuer_rejected(forge, verifier, settings):

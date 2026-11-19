@@ -1,11 +1,12 @@
 """The API client for the MCP listener, driven through the fake API over httpx.MockTransport."""
 import json
+import logging
 import uuid
 
 import httpx
 import pytest
 
-from fake_api import SERVICE_TOKEN, FakeApi, schema_hash
+from fake_api import BASE_URL, SERVICE_TOKEN, UNAUTHENTICATED, FakeApi, schema_hash
 from mcp_server import __version__
 from mcp_server.api_client import (
     ApiClient,
@@ -131,7 +132,6 @@ async def test_response_fields(fake, api):
 
 
 def test_build_path_encodes_and_rejects():
-    assert build_path("/instances/{id}", {"id": "a/b"}) == "/instances/a%2Fb"
     assert build_path("/x/{id}", {"id": "%2e%2e"}) == "/x/%252e%252e"
     assert build_path("/x/{a}/y/{b}", {"a": 5, "b": "c d?e#f"}) == "/x/5/y/c%20d%3Fe%23f"
     assert build_path("/x/{id}", {"id": "..."}) == "/x/..."
@@ -141,11 +141,21 @@ def test_build_path_encodes_and_rejects():
     assert issubclass(PathParamError, ValueError)
 
 
+@pytest.mark.parametrize("value", ["a/b", "abc/live-command", "/", "a\\b", "\\", "abc%2Flive-command",
+                                   "abc%2flive-command", "a%5Cb", "a%5cb"])
+def test_build_path_refuses_a_value_that_would_leave_its_segment(value):
+    # uvicorn decodes the path before Starlette routes it, so %2F encoding would not keep
+    # "abc/live-command" in one segment: /instances/abc%2Flive-command reaches the live-command route.
+    with pytest.raises(PathParamError) as caught:
+        build_path("/instances/{instance_id}", {"instance_id": value})
+    assert str(caught.value) == "path parameter 'instance_id' must not contain '/' or '\\', encoded or not"
+
+
 async def test_encoded_path_reaches_api_verbatim(fake, api):
-    await api.request("GET", build_path("/instances/{id}", {"id": "a/b"}), acting_user="u-123")
+    await api.request("GET", build_path("/instances/{id}", {"id": "a b?c#d"}), acting_user="u-123")
     await api.request("GET", build_path("/x/{id}", {"id": "%2e%2e"}), acting_user="u-123")
 
-    assert [_raw_path(request) for request in fake.requests] == ["/instances/a%2Fb", "/x/%252e%252e"]
+    assert [_raw_path(request) for request in fake.requests] == ["/instances/a%20b%3Fc%23d", "/x/%252e%252e"]
 
 
 async def test_oversized_response_aborted(fake, api):
@@ -204,13 +214,72 @@ async def test_verify_password_outcomes(fake, api):
 
     fake.set_route(*route, 429, {"detail": "too many attempts"}, headers={"Retry-After": "45"})
     assert (await api.verify_password("operator", "correct horse")).retry_after_s == 45
+    # "\u00b2" is a digit to str.isdigit() but not to int(): a Retry-After is ASCII digits or nothing.
+    fake.set_route(*route, 429, lambda request: httpx.Response(
+        429, json={"detail": "too many attempts"}, headers=[(b"retry-after", "\u00b2".encode("latin-1"))]))
+    assert (await api.verify_password("operator", "correct horse")).retry_after_s is None
 
     for status, body in ((500, {"detail": "boom"}), (503, None), (200, {"user_id": 5}), (200, "ok")):
         fake.set_route(*route, status, body)
-        assert (await api.verify_password("operator", "correct horse")).outcome == "unavailable"
+        check = await api.verify_password("operator", "correct horse")
+        assert (check.outcome, check.misconfigured) == ("unavailable", False)
 
     fake.set_route(*route, 200, _connect_error)
     assert (await api.verify_password("operator", "correct horse")).outcome == "unavailable"
+
+
+# Each is the API refusing this server, not the password: only verify-password's own 401
+# {"detail": "invalid credentials"} (contract section 4) says the password was wrong.
+SERVICE_REFUSALS = (
+    (401, UNAUTHENTICATED),
+    (401, {"detail": "Not authenticated"}),
+    (401, None),
+    (401, "Unauthorized"),
+    (401, {"detail": ["invalid credentials"]}),
+    (403, {"detail": "mcp: operation not available"}),
+    (403, {"detail": "invalid credentials"}),
+)
+
+
+async def test_verify_password_service_refusal_is_not_a_wrong_password(fake, api, caplog):
+    route = ("POST", "/internal/mcp/verify-password")
+    with caplog.at_level(logging.WARNING, logger="mcp_server.api_client"):
+        for status, body in SERVICE_REFUSALS:
+            fake.set_route(*route, status, body)
+            check = await api.verify_password("operator", "correct horse")
+            assert (check.outcome, check.misconfigured, check.user_id) == ("unavailable", True, None), (status, body)
+
+    assert len(caplog.records) == len(SERVICE_REFUSALS)
+    for record, request in zip(caplog.records, fake.requests):
+        message = record.getMessage()
+        assert record.levelno == logging.WARNING
+        for name in ("MCP_ENABLED", "MCP_SERVICE_TOKEN", "MCP_ALLOWED_CIDR", "172.31.250.10"):
+            assert name in message
+        assert request.headers["x-mcp-correlation-id"] in message
+        assert "correct horse" not in message and SERVICE_TOKEN not in message
+
+    fake.set_route(*route, 401, {"detail": "invalid credentials"})
+    wrong = await api.verify_password("operator", "wrong")
+    assert (wrong.outcome, wrong.misconfigured) == ("invalid", False)
+
+
+async def test_gate_refusal_is_the_contract_body(fake):
+    # The service token is wrong, so the gate answers before any route: its 401 is not a wrong password.
+    client = ApiClient(BASE_URL, "w" * 40, transport=fake.transport())
+    try:
+        health = await client.request("GET", "/health", acting_user=None)
+        check = await client.verify_password("operator", "correct horse")
+    finally:
+        await client.aclose()
+    assert (health.status, health.body) == (401, {"detail": "mcp: unauthenticated"})
+    assert (check.outcome, check.misconfigured) == ("unavailable", True)
+
+    fake.service_enabled = False  # MCP_ENABLED unset on the api: the same 401 for the right token too
+    api = fake.client()
+    try:
+        assert (await api.verify_password("operator", "correct horse")).outcome == "unavailable"
+    finally:
+        await api.aclose()
 
 
 async def test_post_audit_event_body_shape(fake, api):

@@ -50,7 +50,8 @@ TRUNCATED_TEXT = "[TRUNCATED]"
 # "privatekey" is the lower-cased privateKey; "_private_key" covers kalshi_private_key
 # (the PEM key in POST /brokerages) and "_auth_key" covers secret_auth_key (POST
 # /auth/signup), as the API-side audit redaction learned. "_secret_key" covers
-# APCA-API-SECRET-KEY, Alpaca's secret header.
+# APCA-API-SECRET-KEY, Alpaca's secret header. "_dsn", "_cred_key" and "_master_key" cover
+# PG_DSN, INTELLISTOCK_CRED_KEY and SOCKET_CONTROL_MASTER_KEY in env dumps.
 SECRET_KEY_NAMES = frozenset({
     "api_key", "secret", "secret_key", "key", "token", "access_token", "refresh_token", "oauth_token",
     "password", "password_hash", "passphrase", "passwd", "private_key", "privatekey", "dsn", "odds_api_key",
@@ -58,7 +59,7 @@ SECRET_KEY_NAMES = frozenset({
     "totp_secret", "webhook_url", "aws_secret_access_key", "secret_access_key", "credentials",
 })
 SECRET_KEY_SUFFIXES = ("_api_key", "_secret", "_token", "_private_key", "_password", "_passphrase", "_webhook_url",
-                       "_auth_key", "_secret_key")
+                       "_auth_key", "_secret_key", "_dsn", "_cred_key", "_master_key")
 # Wins over both lists: a page cursor is not a credential.
 NOT_SECRET_KEY_NAMES = frozenset({"next_page_token", "page_token"})
 

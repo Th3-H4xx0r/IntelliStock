@@ -84,6 +84,9 @@ OTHER_BROWSER = "This sign-in link was opened in another browser. Start again fr
 FAILED = "Sign-in failed."
 LOCKED = "Too many attempts. Try again in {minutes} min."
 UNAVAILABLE = "IntelliStock is unavailable. Try again shortly."
+# The API refused this server itself (api_client logs which settings to check), so no password was checked.
+MISCONFIGURED = ("Sign-in is unavailable because this server is misconfigured: IntelliStock refused its "
+                 "credentials. Your password was not checked.")
 WRONG_STEP = "This sign-in step is not available now. Start again from Jarvis."
 FOREIGN_ORIGIN = "This request did not come from the sign-in page."
 BAD_REQUEST = "The request was not understood."
@@ -282,7 +285,7 @@ class _LoginPages:
             return self._error_page(429, locked_message(check.retry_after_s))
         if check.outcome == "unavailable":
             self._deps.provider.settle_attempt(txn_id, failed=False)
-            return self._error_page(503, UNAVAILABLE)
+            return self._error_page(503, MISCONFIGURED if check.misconfigured else UNAVAILABLE)
         if check.outcome == "ok" and self._enrolled(check.user_id):
             self._deps.provider.settle_attempt(txn_id, failed=False)
             self._deps.provider.update_txn(txn_id, stage="second_factor", user_id=check.user_id,

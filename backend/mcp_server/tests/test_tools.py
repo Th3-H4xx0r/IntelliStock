@@ -371,12 +371,16 @@ async def test_call_routes_path_query_body(api, fake):
         assert request.headers["x-mcp-acting-user"] == USER
         assert "x-trace-id" not in request.headers
 
-    # A path value stays one segment: encoded, or refused before any request.
-    fake.set_route("GET", "/instances/a%2Fb", 200, {"id": "a/b"})
-    encoded = await _call(registry, "get_instance", {"instance_id": "a/b"})
+    # A path value stays one segment: encoded, or refused before any request. A "/" is refused even
+    # encoded, since the API's server decodes %2F before routing (abc%2Flive-command is live_command).
+    fake.set_route("GET", "/instances/a%20b", 200, {"id": "a b"})
+    encoded = await _call(registry, "get_instance", {"instance_id": "a b"})
     assert encoded.is_error is False
     request = fake.requests[-1]
-    assert (_raw_path(request), request.url.query, request.content) == ("/instances/a%2Fb", b"", b"")
+    assert (_raw_path(request), request.url.query, request.content) == ("/instances/a%20b", b"", b"")
+    for value in ("abc/live-command", "abc%2Flive-command", "a\\b"):
+        refused = _error(await _call(registry, "get_instance", {"instance_id": value}))
+        assert refused == {"message": "path parameter 'instance_id' must not contain '/' or '\\', encoded or not"}
     refused = _error(await _call(registry, "get_instance", {"instance_id": ".."}))
     assert refused == {"message": "path parameter 'instance_id' must not be empty, '.' or '..'"}
     assert len(fake.requests) == 3

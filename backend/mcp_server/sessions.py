@@ -17,7 +17,7 @@ revocation has committed, outside any transaction.
 import json
 import sqlite3
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, List, Literal, Optional, Sequence
 
 from mcp_server.authdb import AuthDB
@@ -39,8 +39,9 @@ _TOKEN_SQL = (
 
 @dataclass(frozen=True)
 class IssuedPair:
-    access_token: str
-    refresh_token: str
+    # Kept out of repr: a repr ends up in logs.
+    access_token: str = field(repr=False)
+    refresh_token: str = field(repr=False)
     expires_in: int
     scope: str
 

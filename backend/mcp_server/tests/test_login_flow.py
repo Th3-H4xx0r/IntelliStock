@@ -44,6 +44,8 @@ EXPIRED = "This sign-in request expired. Start again from Jarvis."
 OTHER_BROWSER = "This sign-in link was opened in another browser. Start again from Jarvis."
 FAILED = "Sign-in failed."
 UNAVAILABLE = "IntelliStock is unavailable. Try again shortly."
+MISCONFIGURED = ("Sign-in is unavailable because this server is misconfigured: IntelliStock refused its "
+                 "credentials. Your password was not checked.")
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
        "form-action 'self' http://127.0.0.1:33418; frame-ancestors 'none'; base-uri 'none'")
 PAGE_HEADERS = {
@@ -577,6 +579,30 @@ async def test_api_unavailable_shows_503(browser, deps, settings, enrolled, fake
         assert UNAVAILABLE in response.text
     _assert_untouched(deps, txn_id)  # an outage is nobody's failed attempt
     assert _events(db) == []
+
+
+async def test_api_refusing_this_server_is_not_a_wrong_password(browser, deps, settings, enrolled, fake, db):
+    # The gate's own 401 (MCP_ENABLED unset, a service token mismatch, a peer outside MCP_ALLOWED_CIDR) and any
+    # 403 say nothing about the password: more refusals than a lockout takes, and nothing is counted.
+    txn_id, _ = await _open(browser, settings)
+    fake.service_enabled = False
+    for attempt in range(6):
+        if attempt == 3:
+            fake.service_enabled = True
+            fake.set_route("POST", VERIFY_PASSWORD_PATH, 403, {"detail": "mcp: operation not available"})
+        response = await _password(browser, settings, txn_id)
+        assert response.status_code == 503, attempt
+        assert MISCONFIGURED in response.text
+        assert FAILED not in response.text
+    _assert_untouched(deps, txn_id)
+    assert deps.throttle.check("operator") is None
+    assert _events(db) == []
+
+    # Once the API takes this server's credentials again, the same password goes through.
+    fake.clear_route("POST", VERIFY_PASSWORD_PATH)
+    response = await _password(browser, settings, txn_id)
+    assert response.status_code == 303, response.text
+    assert deps.provider.get_txn(txn_id).stage == "second_factor"
 
 
 async def test_api_throttled_shows_429(browser, deps, settings, enrolled, fake, db):

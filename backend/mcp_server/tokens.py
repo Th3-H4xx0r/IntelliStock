@@ -10,6 +10,7 @@ once while refresh tokens keep working.
 The keyring reads the current key from the database on every call: the admin CLI
 rotates from its own process, and the server must see that at once.
 """
+import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -33,6 +34,8 @@ TOKEN_TYPE = "at+jwt"
 ALGORITHM = "EdDSA"
 CLOCK_SKEW_S = 60
 REQUIRED_CLAIMS = ["iss", "aud", "sub", "exp", "iat", "jti", "client_id", "sid"]
+
+_log = logging.getLogger(__name__)
 
 _CURRENT_KEY_SQL = (
     "SELECT kid, private_key_enc FROM signing_keys WHERE retired_at IS NULL "
@@ -149,7 +152,10 @@ class McpTokenVerifier:
         """The token's identity if every check passes; None for any failure, whatever it was."""
         try:
             return self._verify(token)
-        except Exception:
+        except jwt.InvalidTokenError:
+            return None
+        except Exception as exc:  # a server-side fault (the keyring, the store): the class only, never the token
+            _log.warning("access token check failed on a server-side error (%s)", type(exc).__name__)
             return None
 
     def _verify(self, token: str) -> Optional[VerifiedToken]:
@@ -167,7 +173,7 @@ class McpTokenVerifier:
             audience=self._settings.resource_url,
             issuer=self._settings.issuer,
             options={"require": REQUIRED_CLAIMS, "verify_exp": False, "verify_iat": False,
-                     "verify_nbf": False},
+                     "verify_nbf": False, "strict_aud": True},
         )
         # The signature covers the header, so the header read above is the one that was signed.
         now = self._clock()

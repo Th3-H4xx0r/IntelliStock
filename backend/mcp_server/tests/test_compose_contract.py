@@ -1,11 +1,13 @@
 """The deployment contract (contract section 7) as docker-compose.yml, the Dockerfile and .env.example state it.
 
 The mcp container holds the auth store and the service token. It joins mcp_net
-and nothing else, publishes only on the host's loopback (tailscale serve fronts
+and nothing else, at the one address the api admits (172.31.250.10, outside the
+network's dynamic range), publishes only on the host's loopback (tailscale serve fronts
 it), and gets an explicit environment: no env_file, so none of the stack's other
 secrets reach it. The api joins mcp_net beside its default network, which is how
 the MCP server reaches the API's private port.
 """
+import ipaddress
 import re
 from pathlib import Path
 
@@ -19,6 +21,8 @@ CONTRACT_ENV = {"MCP_API_BASE", "MCP_SERVICE_TOKEN", "MCP_PUBLIC_BASE", "MCP_RP_
                 "MCP_JARVIS_CLIENT_ID", "MCP_JARVIS_REDIRECT_URI", "MCP_TOTP_ENC_KEY"}
 FOREIGN_SECRET = re.compile(r"POSTGRES|RETHINK|NEO4J|JWT_SECRET|INTELLISTOCK_CRED_KEY|ALPACA|KALSHI|OPENAI|ANTHROPIC")
 # The .env.example assignments the MCP block documents, values as committed.
+# The api admits this one address on its MCP port (MCP_ALLOWED_CIDR's default, 172.31.250.10/32).
+PINNED_ADDRESS = "172.31.250.10"
 TEMPLATE_ASSIGNMENTS = {"MCP_SERVICE_TOKEN=", "MCP_PUBLIC_BASE=", "MCP_RP_ID=", "MCP_JARVIS_CLIENT_ID=jarvis",
                         "MCP_JARVIS_REDIRECT_URI=", "MCP_TOTP_ENC_KEY=", "MCP_EXTRA_ALLOWED_HOSTS="}
 
@@ -45,6 +49,7 @@ def _env(service):
 def test_mcp_service_isolated():
     mcp = _compose()["services"]["mcp"]
     assert _networks(mcp) == ["mcp_net"]
+    assert mcp["networks"] == {"mcp_net": {"ipv4_address": PINNED_ADDRESS}}
     assert mcp["ports"] == ["127.0.0.1:8090:8090"]
     assert "labels" not in mcp  # no Traefik route: tailscale serve on the host is the only way in
     assert "env_file" not in mcp
@@ -82,8 +87,30 @@ def test_mcp_net_fixed_subnet():
     net = _compose()["networks"]["mcp_net"]
     assert net["name"] == "intellistock_mcp_net"  # a changed project slug cannot make a second, overlapping one
     assert net["driver"] == "bridge"
-    assert net["ipam"]["config"][0]["subnet"] == "172.31.250.0/24"  # the api's MCP_ALLOWED_CIDR
+    assert net["ipam"]["config"] == [{"subnet": "172.31.250.0/24", "ip_range": "172.31.250.128/25",
+                                      "gateway": "172.31.250.1"}]
     assert not net.get("internal"), "an internal network cannot publish 127.0.0.1:8090"
+
+
+def test_pinned_address_is_never_handed_out_dynamically():
+    # Docker does not keep a static address out of dynamic allocation: an api created while mcp is down
+    # could take .10, and mcp could then not start. Dynamic addresses come from ip_range alone.
+    (config,) = _compose()["networks"]["mcp_net"]["ipam"]["config"]
+    subnet, dynamic = ipaddress.ip_network(config["subnet"]), ipaddress.ip_network(config["ip_range"])
+    pinned, gateway = ipaddress.ip_address(PINNED_ADDRESS), ipaddress.ip_address(config["gateway"])
+    assert dynamic.subnet_of(subnet)
+    assert pinned in subnet and pinned not in dynamic
+    assert gateway in subnet and gateway not in dynamic and gateway != pinned  # outside MCP_ALLOWED_CIDR
+
+
+def test_env_template_names_the_pinned_address_for_the_api():
+    text = (REPO / ".env.example").read_text(encoding="utf-8")
+    block = text[text.index("# MCP server for Jarvis"):]
+    for needle in ("MCP_ENABLED", "MCP_ALLOWED_CIDR", PINNED_ADDRESS + "/32"):
+        assert needle in block
+    # The bridge is not internal: the template says what the container can still reach.
+    for needle in ("RETHINKDB_BIND_ADDR", "Neo4j", "127.0.0.1"):
+        assert needle in block
 
 
 def test_mcp_env_is_explicit_and_secret_free():

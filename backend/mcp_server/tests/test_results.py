@@ -175,6 +175,18 @@ def test_not_secret_names_kept():
     assert redact(data) == data
 
 
+@pytest.mark.parametrize("name", ["pg_dsn", "PG_DSN", "postgres_dsn", "intellistock_cred_key", "socket_master_key",
+                                  "SOCKET_CONTROL_MASTER_KEY"])
+def test_dsn_and_master_key_names_are_secret(name):
+    assert is_secret_key(name)
+
+
+def test_dsn_and_cred_key_free_text_redacted():
+    text = "PG_DSN=postgresql://user:pass@db:5432/x INTELLISTOCK_CRED_KEY=Zm9vYmFyYmF6cXV4 tier=1"
+    assert redact(text) == f"PG_DSN={REDACTED} INTELLISTOCK_CRED_KEY={REDACTED} tier=1"
+    assert redact({"pg_dsn": "postgresql://user:pass@db/x"}) == {"pg_dsn": REDACTED}
+
+
 def test_secret_values_redacted_at_any_depth_with_empty_and_bool_values_kept():
     data = {"outer": [{"inner": {"apiKey": "live-key-value", "token": 123456, "credentials": {"user": "u", "pw": "p"},
                                  "odds_api_key": "", "refresh_token": None, "has_secret": True}}]}
