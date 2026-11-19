@@ -239,6 +239,62 @@ struct ApprovalDetailModelTests {
         #expect(m.refreshError == nil)
     }
 
+    /// A poll that left before the decision and lands after it is older than
+    /// the decision's answer, so it is dropped: the screen never goes back to
+    /// "pending" (and an enabled Approve) after "Denied".
+    @Test func aPollInFlightAcrossADecisionCannotUndoIt() async {
+        let source = FakeApprovalsSource(details: [approvalA()])
+        source.decideResult = approvalA(status: "denied")
+        let m = await model(source)
+        let reading = ApprovalTestGate()
+        source.detailGate = reading
+        let poll = Task { await m.refresh() }
+        #expect(await eventually { source.approvalCalls.count == 2 })   // the load, then the held poll
+        #expect(await m.decide(.deny).outcome == .decided)
+        reading.open()
+        await poll.value
+        #expect(m.state.value?.status == "denied")
+        #expect(!m.gate(now: kT0).canApprove)
+    }
+
+    /// The same for a poll that left while the decision was being sent: the
+    /// decision's answer comes from after the server acted, so it wins.
+    @Test func aPollSentDuringTheDecisionCannotUndoIt() async {
+        let source = FakeApprovalsSource(details: [approvalA()])
+        source.decideResult = approvalA(status: "executed", resultStatus: 200)
+        let sending = ApprovalTestGate()
+        source.decideGate = sending
+        let m = await model(source)
+        let decision = Task { await m.decide(.approve) }
+        #expect(await eventually { m.phase == .sending(.approve) })
+        let reading = ApprovalTestGate()
+        source.detailGate = reading
+        let poll = Task { await m.refresh() }
+        #expect(await eventually { source.approvalCalls.count == 2 })
+        sending.open()
+        #expect(await decision.value.outcome == .decided)
+        reading.open()
+        await poll.value
+        #expect(m.state.value?.status == "executed")
+        #expect(m.refreshError == nil)
+    }
+
+    /// Two overlapping polls: the older answer landing last is dropped too.
+    @Test func anOlderPollLandingLastIsDropped() async {
+        let source = FakeApprovalsSource(details: [approvalA(), approvalA(), approvalA(status: "denied")])
+        let m = await model(source)
+        let first = ApprovalTestGate()
+        source.detailGate = first
+        let older = Task { await m.refresh() }                            // takes "pending", held
+        #expect(await eventually { source.approvalCalls.count == 2 })
+        source.detailGate = nil
+        await m.refresh()                                                  // takes "denied"
+        #expect(m.state.value?.status == "denied")
+        first.open()
+        await older.value
+        #expect(m.state.value?.status == "denied")
+    }
+
     @Test func pollIntervalFollowsStatus() async {
         let source = FakeApprovalsSource(details: [approvalA(), approvalA(status: "approved"), approvalA(status: "executed")])
         let m = await model(source)

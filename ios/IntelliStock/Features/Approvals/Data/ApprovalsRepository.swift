@@ -21,7 +21,8 @@ nonisolated protocol ApprovalDevicesSource: Sendable {
 
 /// Thrown before any request when an id fails ApprovalIds.isValid.
 nonisolated let kInvalidApprovalId = ApiError(message: "Not a valid approval id.")
-/// A 2xx whose body has no "id" (statusCode nil, so callers read it as "unconfirmed").
+/// A 2xx whose body has no "id", or another approval's (statusCode nil, so
+/// callers read it as "unconfirmed").
 nonisolated let kUnexpectedApprovalResponse = ApiError(message: "The server sent an unexpected response.")
 
 /// Data access for `/mcp/approvals` and `/mcp/approval-devices`. Non-2xx
@@ -45,7 +46,7 @@ nonisolated struct ApprovalsRepository: ApprovalsSource, ApprovalDevicesSource {
     func approval(_ id: String) async throws -> McpApproval {
         try Self.requireValid(id)
         let data = try await client.get("/mcp/approvals/\(dartEncodeComponent(id))")
-        return try Self.confirmed(data)
+        return try Self.confirmed(data, id: id)
     }
 
     /// `POST /mcp/approvals/{id}/decision`. An approval answers after the
@@ -53,7 +54,7 @@ nonisolated struct ApprovalsRepository: ApprovalsSource, ApprovalDevicesSource {
     func decide(_ id: String, _ body: ApprovalDecisionBody) async throws -> McpApproval {
         try Self.requireValid(id)
         let data = try await client.post("/mcp/approvals/\(dartEncodeComponent(id))/decision", body: body.json)
-        return try Self.confirmed(data)
+        return try Self.confirmed(data, id: id)
     }
 
     /// `POST /mcp/approval-devices` with the 65-byte X9.62 public key in
@@ -83,10 +84,11 @@ nonisolated struct ApprovalsRepository: ApprovalsSource, ApprovalDevicesSource {
         guard ApprovalIds.isValid(id) else { throw kInvalidApprovalId }
     }
 
-    /// The approval a 2xx carried; one without an id is not a confirmation.
-    private static func confirmed(_ data: JSON) throws -> McpApproval {
+    /// The approval a 2xx carried. One without an id, or with an id other
+    /// than the one requested, is not a confirmation.
+    private static func confirmed(_ data: JSON, id: String) throws -> McpApproval {
         let approval = McpApproval(json: data)
-        guard !approval.id.isEmpty else { throw kUnexpectedApprovalResponse }
+        guard !approval.id.isEmpty, approval.id == id else { throw kUnexpectedApprovalResponse }
         return approval
     }
 }

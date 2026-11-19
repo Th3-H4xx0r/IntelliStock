@@ -82,6 +82,7 @@ nonisolated final class FakeApprovalsSource: ApprovalsSource, ApprovalDevicesSou
     private var _decideResult: McpApproval?
     private var _decideError: (any Error)?
     private var _decideGate: ApprovalTestGate?
+    private var _detailGate: ApprovalTestGate?
     private var _receipt = ApprovalDeviceReceipt(json: ["device_id": "dev_1"])
     private var _registerError: (any Error)?
     private var _devicesList: [McpApprovalDevice] = []
@@ -111,6 +112,9 @@ nonisolated final class FakeApprovalsSource: ApprovalsSource, ApprovalDevicesSou
     var decideError: (any Error)? { get { locked { _decideError } } set { locked { _decideError = newValue } } }
     /// When set, `decide` records its call, then waits for the gate to open.
     var decideGate: ApprovalTestGate? { get { locked { _decideGate } } set { locked { _decideGate = newValue } } }
+    /// When set, `approval(_:)` records its call and takes its answer, then
+    /// waits for the gate to open before returning it.
+    var detailGate: ApprovalTestGate? { get { locked { _detailGate } } set { locked { _detailGate = newValue } } }
     var receipt: ApprovalDeviceReceipt { get { locked { _receipt } } set { locked { _receipt = newValue } } }
     var registerError: (any Error)? { get { locked { _registerError } } set { locked { _registerError = newValue } } }
     var devicesList: [McpApprovalDevice] { get { locked { _devicesList } } set { locked { _devicesList = newValue } } }
@@ -136,13 +140,17 @@ nonisolated final class FakeApprovalsSource: ApprovalsSource, ApprovalDevicesSou
     }
 
     func approval(_ id: String) async throws -> McpApproval {
-        try locked {
+        let (gate, answer) = locked { () -> (ApprovalTestGate?, Result<McpApproval, any Error>) in
             _approvalCalls.append(id)
-            if let _detailError { throw _detailError }
-            guard let next = _details.first else { throw ApiError(message: "No approval scripted.", statusCode: 404) }
+            if let _detailError { return (_detailGate, .failure(_detailError)) }
+            guard let next = _details.first else {
+                return (_detailGate, .failure(ApiError(message: "No approval scripted.", statusCode: 404)))
+            }
             if _details.count > 1 { _details.removeFirst() }
-            return next
+            return (_detailGate, .success(next))
         }
+        if let gate { await gate.wait() }
+        return try answer.get()
     }
 
     func decide(_ id: String, _ body: ApprovalDecisionBody) async throws -> McpApproval {

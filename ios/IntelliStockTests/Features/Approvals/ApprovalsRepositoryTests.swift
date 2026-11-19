@@ -96,6 +96,18 @@ struct ApprovalsRepositoryTests {
         #expect(kUnexpectedApprovalResponse.statusCode == nil)
     }
 
+    /// The row a 2xx carries must be the approval that was asked for: an
+    /// answer about another one confirms nothing about this one.
+    @Test func anAnswerForAnotherApprovalIsUnexpected() async {
+        let stub = DataStub(json: encode(ApprovalWireTests.full))                // id "ap_7f3c"
+        let repo = ApprovalsRepository(client: stub.client)
+        let body = ApprovalDecisionBody(decision: .approve, bodySha256: kVectorAHash, ts: 1_795_068_030, deviceId: "dev_1", signature: Data([0x30, 0x01]))
+        await #expect(throws: kUnexpectedApprovalResponse) { _ = try await repo.approval("ap_other") }
+        await #expect(throws: kUnexpectedApprovalResponse) { _ = try await repo.decide("ap_other", body) }
+        await #expect(throws: kUnexpectedApprovalResponse) { _ = try await repo.approval("AP_7F3C") }   // ids are exact
+        #expect(stub.requests.map(\.path) == ["/mcp/approvals/ap_other", "/mcp/approvals/ap_other/decision", "/mcp/approvals/AP_7F3C"])
+    }
+
     @Test func listsAndDeletesDevices() async throws {
         let stub = DataStub(json: #"{"devices": [{"device_id": "dev_1", "name": "iPhone"}, "junk", {"name": "no id"}]}"#)
         let repo = ApprovalsRepository(client: stub.client)

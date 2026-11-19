@@ -118,7 +118,7 @@ nonisolated enum Route: Hashable, Sendable {
             case "strategies": self = .strategy(id)
             case "stock": self = .stock(StockRoute(symbol: id))
             case "analysis": self = .analysis(id)
-            case "approvals": self = .approval(id)
+            case "approvals" where ApprovalIds.isValid(id): self = .approval(id)
             case "settings" where id == "notifications": self = .notificationSettings
             case "settings" where id == "approval-devices": self = .approvalDevices
             default: return nil

@@ -63,6 +63,11 @@ final class ApprovalDetailModel {
     @ObservationIgnored private let devices: ApprovalDeviceStore
     @ObservationIgnored private let baseURL: () -> String
     @ObservationIgnored private let clock: () -> Date
+    /// Every read is numbered when it starts, and a decision's answer when it
+    /// lands. An answer older than the one on screen is dropped, so a poll in
+    /// flight across a decision can't put the screen back to "pending".
+    @ObservationIgnored private var requestSeq = 0
+    @ObservationIgnored private var appliedSeq = 0
 
     init(approvalId: String, source: @escaping () -> any ApprovalsSource, signer: any ApprovalSigner,
          devices: ApprovalDeviceStore, baseURL: @escaping () -> String, clock: @escaping () -> Date = Date.init) {
@@ -95,19 +100,28 @@ final class ApprovalDetailModel {
 
     /// An invalid id fails without a request.
     func load() async {
-        state = await Loadable.capture { try await fetch() }
+        let seq = nextSeq()
+        let loaded = await Loadable.capture { try await fetch() }
+        guard seq > appliedSeq else { return }
+        if loaded.value != nil { appliedSeq = seq }
+        state = loaded
         fingerprintMatches = state.value.map(ApprovalFingerprint.matches) ?? false
         refreshError = nil
     }
 
     /// Like `load`, but a failure keeps the last approval and sets
-    /// `refreshError`; a cancelled refresh changes nothing.
+    /// `refreshError`; a cancelled refresh changes nothing, and neither does
+    /// an answer older than the one on screen.
     func refresh() async {
+        let seq = nextSeq()
         do {
-            show(try await fetch())
+            let approval = try await fetch()
+            guard seq > appliedSeq else { return }
+            show(approval, seq: seq)
         } catch where error.isCancellation {
             return
         } catch {
+            guard seq > appliedSeq else { return }
             if state.value == nil {
                 state = .failed(error)
             } else {
@@ -163,7 +177,9 @@ final class ApprovalDetailModel {
                                         deviceId: device.deviceId, signature: signature)
         do {
             let decided = try await source().decide(approvalId, body)
-            show(decided)
+            // Numbered on arrival: it reflects the server after it acted, so
+            // it outranks every read already in flight.
+            show(decided, seq: nextSeq())
             return Self.result(.decided, Self.decidedText(decision, decided))
         } catch let error as ApiError where error.statusCode == 409 || error.statusCode == 410 {
             await refresh()
@@ -189,7 +205,13 @@ final class ApprovalDetailModel {
         return try await source().approval(approvalId)
     }
 
-    private func show(_ approval: McpApproval) {
+    private func nextSeq() -> Int {
+        requestSeq += 1
+        return requestSeq
+    }
+
+    private func show(_ approval: McpApproval, seq: Int) {
+        appliedSeq = seq
         state = .loaded(approval)
         fingerprintMatches = ApprovalFingerprint.matches(approval)
         refreshError = nil

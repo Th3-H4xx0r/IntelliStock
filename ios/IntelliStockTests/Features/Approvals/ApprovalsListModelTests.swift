@@ -80,4 +80,17 @@ struct ApprovalsListModelTests {
         #expect(Route.approval("ap_7f3c").path == "/approvals/ap_7f3c")
         #expect(Route(path: "/approvals/a/b") == nil)
     }
+
+    /// A link's id is checked before it becomes a route. The router
+    /// percent-decodes path parameters, so `..%2Fbrokerages` would
+    /// otherwise reach it as `../brokerages`.
+    @Test func hostileApprovalIdsAreNotRoutes() {
+        #expect(Route(path: "/approvals/..%2Fbrokerages") == nil)
+        #expect(Route(path: "/approvals/a%2Fb") == nil)
+        #expect(Route(path: "/approvals/ap%207f3c") == nil)
+        #expect(Route(path: "/approvals/" + String(repeating: "a", count: 129)) == nil)
+        let longest = String(repeating: "a", count: 128)
+        #expect(Route(path: "/approvals/" + longest) == .approval(longest))
+        #expect(Route(path: "/approvals/ap_7F3c-9") == .approval("ap_7F3c-9"))
+    }
 }
