@@ -3599,7 +3599,8 @@ def api_model_strategies(model_id: str, conn=Depends(conn_dependency), current_u
 # --- Backtests ---
 
 
-@app.get("/backtests", response_class=JSONResponse)
+@app.get("/backtests", response_class=JSONResponse,
+         operation_id="list_backtests", openapi_extra=mcp_policy("read", tool="list_backtests"))
 def api_list_backtests(
     instance_id: Optional[str] = None,
     page: int = 1,
@@ -3609,6 +3610,7 @@ def api_list_backtests(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
+    """Return backtests, optionally for one instance_id, paged and sorted by completed_at, pnl or pnl_percent."""
     return _run(
         action_list_backtests,
         conn,
@@ -3643,8 +3645,10 @@ def api_list_instance_backtests(
     )
 
 
-@app.post("/backtests", response_class=JSONResponse)
+@app.post("/backtests", response_class=JSONResponse,
+          operation_id="create_backtest", openapi_extra=mcp_policy("write", tool="create_backtest", cost=True))
 def api_create_backtest(body: CreateBacktestBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Queue a paid backtest run of an instance's strategy from start_date to end_date; granularity is in seconds (default 60)."""
     gran_sec = parse_granularity_to_seconds(body.granularity) if body.granularity else 60
     return _run(
         action_create_backtest,
@@ -3747,7 +3751,8 @@ def api_migrate_credentials(
     return report
 
 
-@app.get("/backtest-evidence/source-identity", response_class=JSONResponse)
+@app.get("/backtest-evidence/source-identity", response_class=JSONResponse,
+         operation_id="evidence_source_identity", openapi_extra=mcp_policy("read"))
 def api_evidence_source_identity(current_user: dict = Depends(get_current_user)):
     """The executing source digest of THIS deployment.
 
@@ -3770,7 +3775,8 @@ class PublishEvidenceMatrixBody(BaseModel):
     matrix: Dict[str, Any] = Field(default_factory=dict)
 
 
-@app.post("/backtest-evidence/matrices", response_class=JSONResponse)
+@app.post("/backtest-evidence/matrices", response_class=JSONResponse,
+          operation_id="publish_evidence_matrix", openapi_extra=mcp_policy("write"))
 def api_publish_evidence_matrix(
     body: PublishEvidenceMatrixBody,
     conn=Depends(conn_dependency),
@@ -3799,45 +3805,59 @@ def api_publish_evidence_matrix(
     }
 
 
-@app.delete("/backtests/{backtest_id}", response_class=JSONResponse)
+@app.delete("/backtests/{backtest_id}", response_class=JSONResponse,
+            operation_id="delete_backtest", openapi_extra=mcp_policy("irreversible"))
 def api_delete_backtest(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Delete a backtest's queue row and every stored result row. Irreversible."""
     return _run(action_delete_backtest, conn, backtest_id)
 
 
-@app.post("/backtests/stop-all", response_class=JSONResponse)
+@app.post("/backtests/stop-all", response_class=JSONResponse,
+          operation_id="stop_all_backtests", openapi_extra=mcp_policy("irreversible"))
 def api_stop_all_backtests(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Stop all running backtests and clear the queue."""
     return _run(action_stop_all_backtests, conn)
 
 
-@app.post("/backtests/{backtest_id}/stop", response_class=JSONResponse)
+@app.post("/backtests/{backtest_id}/stop", response_class=JSONResponse,
+          operation_id="stop_backtest", openapi_extra=mcp_policy("write", tool="stop_backtest"))
 def api_stop_backtest(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Stop a running backtest and mark its result stopped; refused unless its status is running."""
     return _run(action_stop_backtest, conn, backtest_id)
 
 
-@app.post("/backtests/{backtest_id}/pause", response_class=JSONResponse)
+@app.post("/backtests/{backtest_id}/pause", response_class=JSONResponse,
+          operation_id="pause_backtest", openapi_extra=mcp_policy("write"))
 def api_pause_backtest(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Pause a backtest: the engine stops advancing until it is resumed."""
     return _run(action_pause_backtest, conn, backtest_id)
 
 
-@app.post("/backtests/{backtest_id}/resume", response_class=JSONResponse)
+@app.post("/backtests/{backtest_id}/resume", response_class=JSONResponse,
+          operation_id="resume_backtest", openapi_extra=mcp_policy("write", cost=True))
 def api_resume_backtest(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Resume a paused backtest, so the engine continues its run and its LLM spend."""
     return _run(action_resume_backtest, conn, backtest_id)
 
 
-@app.get("/backtests/{backtest_id}/status", response_class=JSONResponse)
+@app.get("/backtests/{backtest_id}/status", response_class=JSONResponse,
+         operation_id="get_backtest_status", openapi_extra=mcp_policy("read", tool="get_backtest_status"))
 def api_backtest_status(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Return status and progress from BacktestResults (or queue if not yet run)."""
     return _run(action_get_backtest_status, conn, backtest_id)
 
 
-@app.get("/backtests/{backtest_id}/summary", response_class=JSONResponse)
+@app.get("/backtests/{backtest_id}/summary", response_class=JSONResponse,
+         operation_id="get_backtest_summary", openapi_extra=mcp_policy("read", tool="get_backtest_summary"))
 def api_summarize_backtest(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return a backtest's summary: status, dates, tickers, P&L overall and per stock, fees and elapsed time."""
     return _run(action_summarize_backtest, conn, backtest_id)
 
 
-@app.get("/backtests/{backtest_id}/logs", response_class=JSONResponse)
+@app.get("/backtests/{backtest_id}/logs", response_class=JSONResponse,
+         operation_id="backtest_logs", openapi_extra=mcp_policy("read"))
 def api_backtest_logs(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return a backtest's log lines, from the persisted log file when there is one."""
     return _run(action_backtest_logs, conn, backtest_id)
 
 
@@ -3853,8 +3873,10 @@ class TrendResearchJobBody(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
-@app.post("/trend-research/jobs", response_class=JSONResponse)
+@app.post("/trend-research/jobs", response_class=JSONResponse,
+          operation_id="tr_job_submit", openapi_extra=mcp_policy("write", cost=True))
 def api_tr_job_submit(body: TrendResearchJobBody, current_user: dict = Depends(get_current_user)):
+    """Launch a paid trend-research job (an ingest or a ledger build); one TR job runs at a time."""
     from trend_research import jobs as tr_jobs
     try:
         return {"id": tr_jobs.submit(body.kind, body.params)}
@@ -3866,8 +3888,10 @@ def api_tr_job_submit(body: TrendResearchJobBody, current_user: dict = Depends(g
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/trend-research/jobs/{job_id}", response_class=JSONResponse)
+@app.get("/trend-research/jobs/{job_id}", response_class=JSONResponse,
+         operation_id="tr_job_status", openapi_extra=mcp_policy("read"))
 def api_tr_job_status(job_id: str, current_user: dict = Depends(get_current_user)):
+    """Return a trend-research job's state, progress, timestamps and error."""
     from trend_research import jobs as tr_jobs
     try:
         return tr_jobs.status(job_id)
@@ -3875,8 +3899,10 @@ def api_tr_job_status(job_id: str, current_user: dict = Depends(get_current_user
         raise HTTPException(status_code=404, detail="TR job not found")
 
 
-@app.post("/trend-research/jobs/{job_id}/stop", response_class=JSONResponse)
+@app.post("/trend-research/jobs/{job_id}/stop", response_class=JSONResponse,
+          operation_id="tr_job_stop", openapi_extra=mcp_policy("write"))
 def api_tr_job_stop(job_id: str, current_user: dict = Depends(get_current_user)):
+    """Stop a trend-research job's container and mark it stopped if it is still queued or running."""
     from trend_research import jobs as tr_jobs
     try:
         return tr_jobs.stop(job_id)
@@ -3891,19 +3917,22 @@ def api_tr_job_stop(job_id: str, current_user: dict = Depends(get_current_user))
 # so a later {build_id} route would otherwise capture "latest" and route all
 # /latest traffic into the generic by-id handlers. Keep the order below intact.
 
-@app.get("/nexus-graph-builds", response_class=JSONResponse)
+@app.get("/nexus-graph-builds", response_class=JSONResponse,
+         operation_id="list_nexus_graph_builds", openapi_extra=mcp_policy("read"))
 def api_list_nexus_graph_builds(limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """List recent nexus_graph_engine builds (newest first)."""
     return _run(action_list_nexus_graph_builds, conn, limit)
 
 
-@app.get("/nexus-graph-builds/latest", response_class=JSONResponse)
+@app.get("/nexus-graph-builds/latest", response_class=JSONResponse,
+         operation_id="get_latest_nexus_graph_build", openapi_extra=mcp_policy("read"))
 def api_get_latest_nexus_graph_build(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Return the most recent build's full document (shortcut for id=latest)."""
     return _run(action_get_nexus_graph_build, conn, "latest")
 
 
-@app.get("/nexus-graph-builds/latest/logs", response_class=JSONResponse)
+@app.get("/nexus-graph-builds/latest/logs", response_class=JSONResponse,
+         operation_id="get_latest_nexus_graph_build_logs", openapi_extra=mcp_policy("read"))
 def api_get_latest_nexus_graph_build_logs(since_line: int = 0, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Return the most recent build's log (shortcut for id=latest).
 
@@ -3914,13 +3943,15 @@ def api_get_latest_nexus_graph_build_logs(since_line: int = 0, conn=Depends(conn
     return _run(action_nexus_graph_build_logs, conn, "latest", since_line)
 
 
-@app.get("/nexus-graph-builds/{build_id}", response_class=JSONResponse)
+@app.get("/nexus-graph-builds/{build_id}", response_class=JSONResponse,
+         operation_id="get_nexus_graph_build", openapi_extra=mcp_policy("read"))
 def api_get_nexus_graph_build(build_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Return full build document. Pass build_id=latest to resolve to the newest build."""
     return _run(action_get_nexus_graph_build, conn, build_id)
 
 
-@app.get("/nexus-graph-builds/{build_id}/logs", response_class=JSONResponse)
+@app.get("/nexus-graph-builds/{build_id}/logs", response_class=JSONResponse,
+         operation_id="get_nexus_graph_build_logs", openapi_extra=mcp_policy("read"))
 def api_get_nexus_graph_build_logs(build_id: str, since_line: int = 0, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Return log file for a build. Pass build_id=latest to resolve to the newest build.
 
@@ -4435,63 +4466,75 @@ def api_swing_calibration(instance_id: str, conn=Depends(conn_dependency),
     return _run(action_swing_calibration, conn, instance_id)
 
 
-@app.get("/backtests/{backtest_id}/graph-data", response_class=JSONResponse)
+@app.get("/backtests/{backtest_id}/graph-data", response_class=JSONResponse,
+         operation_id="graph_backtest_data", openapi_extra=mcp_policy("read"))
 def api_graph_backtest_data(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return a backtest's portfolio value history, trades, prices and decisions for charting."""
     return _run(action_graph_backtest_data, conn, backtest_id)
 
 
-@app.get("/backtests/{backtest_id}/playback-data", response_class=JSONResponse)
+@app.get("/backtests/{backtest_id}/playback-data", response_class=JSONResponse,
+         operation_id="backtest_playback_data", openapi_extra=mcp_policy("read"))
 def api_backtest_playback_data(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Return time-ordered event stream for the backtest playback UI."""
     return _run(action_get_backtest_playback_data, conn, backtest_id)
 
 
-@app.get("/backtests/best-per-strategy", response_class=JSONResponse)
+@app.get("/backtests/best-per-strategy", response_class=JSONResponse,
+         operation_id="backtest_best_per_strategy", openapi_extra=mcp_policy("read"))
 def api_backtest_best_per_strategy(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the best completed backtest by pnl for each strategy id."""
     return _run(action_backtest_best_per_strategy, conn)
 
 
 # --- AI Backtesting Agent ---
 
 
-@app.get("/agent/control", response_class=JSONResponse)
+@app.get("/agent/control", response_class=JSONResponse,
+         operation_id="agent_control_get", openapi_extra=mcp_policy("read"))
 def api_agent_control_get(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Get agent status: running, last_run_date, count_today."""
     return _run(action_agent_control_get, conn)
 
 
-@app.post("/agent/control", response_class=JSONResponse)
+@app.post("/agent/control", response_class=JSONResponse,
+          operation_id="agent_control_set", openapi_extra=mcp_policy("write", cost=True))
 def api_agent_control_set(body: AgentControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Start, stop, or pause/resume the AI backtesting agent. Send running and/or paused (omit to leave unchanged). Optional special_request: instruction for strategy generation (e.g. include a specific strategy in each)."""
     return _run(action_agent_control_set, conn, body.running, body.paused, body.special_request)
 
 
-@app.post("/agent/resume-timer", response_class=JSONResponse)
+@app.post("/agent/resume-timer", response_class=JSONResponse,
+          operation_id="resume_timer", openapi_extra=mcp_policy("write", cost=True))
 def api_resume_timer(body: ResumeTimerBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Schedule agent to resume after specified time. All time fields optional (default 0)."""
     return _run(action_resume_timer, conn, body.days or 0, body.hours or 0, body.minutes or 0, body.seconds or 0)
 
 
-@app.post("/agent/restart", response_class=JSONResponse)
+@app.post("/agent/restart", response_class=JSONResponse,
+          operation_id="agent_restart", openapi_extra=mcp_policy("write", cost=True))
 def api_agent_restart(body: AgentRestartBody = AgentRestartBody(), conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Restart the AI backtesting agent: stop, wait a few seconds, then start. Optional special_request for strategy generation."""
     return _run(action_agent_restart, conn, body.special_request)
 
 
-@app.post("/agent/increment-count", response_class=JSONResponse)
+@app.post("/agent/increment-count", response_class=JSONResponse,
+          operation_id="agent_increment_count", openapi_extra=mcp_policy("never"))
 def api_agent_increment_count(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Increment today's backtest count (used by agent when it queues a backtest)."""
     count = action_agent_increment_backtest_count(conn)
     return {"count_today": count}
 
 
-@app.get("/agent/results", response_class=JSONResponse)
+@app.get("/agent/results", response_class=JSONResponse,
+         operation_id="agent_results", openapi_extra=mcp_policy("read"))
 def api_agent_results(conn=Depends(conn_dependency), limit: int = 100, current_user: dict = Depends(get_current_user)):
     """List AI backtesting results (profitable strategies)."""
     return _run(action_list_ai_backtest_results, conn, limit)
 
 
-@app.post("/agent/results", response_class=JSONResponse)
+@app.post("/agent/results", response_class=JSONResponse,
+          operation_id="agent_results_post", openapi_extra=mcp_policy("never"))
 def api_agent_results_post(body: AgentResultBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Record an AI backtest result (used by the agent service)."""
     return _run(
@@ -4514,14 +4557,16 @@ def api_agent_results_post(body: AgentResultBody, conn=Depends(conn_dependency),
     )
 
 
-@app.get("/agent/best", response_class=JSONResponse)
+@app.get("/agent/best", response_class=JSONResponse,
+         operation_id="agent_best", openapi_extra=mcp_policy("read"))
 def api_agent_best(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Get the current best strategy (tag Best in Strategies table). Returns null if none set."""
     best = action_agent_get_best(conn)
     return {"best": best}
 
 
-@app.post("/agent/best", response_class=JSONResponse)
+@app.post("/agent/best", response_class=JSONResponse,
+          operation_id="agent_set_best_post", openapi_extra=mcp_policy("never"))
 def api_agent_set_best_post(body: AgentSetBestBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Set or update the best strategy if this result outperforms current best. Persists in Strategies with tag Best."""
     return _run(
@@ -4534,13 +4579,15 @@ def api_agent_set_best_post(body: AgentSetBestBody, conn=Depends(conn_dependency
     )
 
 
-@app.get("/agent/top5", response_class=JSONResponse)
+@app.get("/agent/top5", response_class=JSONResponse,
+         operation_id="agent_top5_get", openapi_extra=mcp_policy("read"))
 def api_agent_top5_get(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Get the current top-5 best strategies ranked by P&L%."""
     return _run(action_agent_get_top5, conn)
 
 
-@app.post("/agent/top5", response_class=JSONResponse)
+@app.post("/agent/top5", response_class=JSONResponse,
+          operation_id="agent_top5_update", openapi_extra=mcp_policy("never"))
 def api_agent_top5_update(body: AgentUpdateTop5Body, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Submit a candidate strategy to the top-5 list. Replaces worst entry if candidate qualifies."""
     return _run(
@@ -4554,171 +4601,199 @@ def api_agent_top5_update(body: AgentUpdateTop5Body, conn=Depends(conn_dependenc
     )
 
 
-@app.post("/agent/cycle-log", response_class=JSONResponse)
+@app.post("/agent/cycle-log", response_class=JSONResponse,
+          operation_id="agent_cycle_log_create", openapi_extra=mcp_policy("never"))
 def api_agent_cycle_log_create(body: AgentCycleLogCreateBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Create a new agent cycle log entry (called by the agent at strategy start)."""
     return _run(action_agent_cycle_log_create, conn, body.cycle_id, body.name)
 
 
-@app.post("/agent/cycle-log/{log_id}/update", response_class=JSONResponse)
+@app.post("/agent/cycle-log/{log_id}/update", response_class=JSONResponse,
+          operation_id="agent_cycle_log_update", openapi_extra=mcp_policy("never"))
 def api_agent_cycle_log_update(log_id: str, body: AgentCycleLogUpdateBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Update an agent cycle log entry with stage progress or final status."""
     return _run(action_agent_cycle_log_update, conn, log_id, body.status, body.stages, body.final_result)
 
 
-@app.get("/agent/runs", response_class=JSONResponse)
+@app.get("/agent/runs", response_class=JSONResponse,
+         operation_id="agent_runs", openapi_extra=mcp_policy("read"))
 def api_agent_runs(page: int = 1, per_page: int = 20, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """List agent strategy attempts (cycle log) with pagination."""
     return _run(action_list_agent_runs, conn, page, per_page)
 
 
-@app.get("/learning/overview", response_class=JSONResponse)
+@app.get("/learning/overview", response_class=JSONResponse,
+         operation_id="learning_overview", openapi_extra=mcp_policy("read"))
 def api_learning_overview(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Headline counters for the Learning tab. `acts_autonomously` is false
     while the subsystem is in observe mode — the UI must not imply otherwise."""
     return _run(action_learning_overview, conn)
 
 
-@app.get("/learning/findings", response_class=JSONResponse)
+@app.get("/learning/findings", response_class=JSONResponse,
+         operation_id="learning_findings", openapi_extra=mcp_policy("read"))
 def api_learning_findings(limit: int = 100, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Findings raised by the self-learning guards, newest first."""
     return _run(action_learning_findings, conn, limit)
 
 
-@app.get("/learning/funnels", response_class=JSONResponse)
+@app.get("/learning/funnels", response_class=JSONResponse,
+         operation_id="learning_funnels", openapi_extra=mcp_policy("read"))
 def api_learning_funnels(limit: int = 100, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Per-run decided / executed / refused counts."""
     return _run(action_learning_funnels, conn, limit)
 
 
-@app.get("/learning/observations/{run_id}", response_class=JSONResponse)
+@app.get("/learning/observations/{run_id}", response_class=JSONResponse,
+         operation_id="learning_observations", openapi_extra=mcp_policy("read"))
 def api_learning_observations(run_id: str, limit: int = 500, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Decision-level observations for one run, including the refusals."""
     return _run(action_learning_observations, conn, run_id, limit)
 
 
-@app.post("/learning/purge", response_class=JSONResponse)
+@app.post("/learning/purge", response_class=JSONResponse,
+          operation_id="learning_purge", openapi_extra=mcp_policy("irreversible"))
 def api_learning_purge(body: LearningPurgeBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Delete derived learning data so the subsystem re-observes from scratch.
     Settings and the four configured role models are kept."""
     return _run(action_learning_purge, conn, body.confirm)
 
 
-@app.get("/learning/engine-status", response_class=JSONResponse)
+@app.get("/learning/engine-status", response_class=JSONResponse,
+         operation_id="learning_engine_status", openapi_extra=mcp_policy("read"))
 def api_learning_engine_status(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """What the engine container reports about its own code and last turn."""
     return _run(action_learning_engine_status, conn)
 
 
-@app.get("/learning/activity", response_class=JSONResponse)
+@app.get("/learning/activity", response_class=JSONResponse,
+         operation_id="learning_activity", openapi_extra=mcp_policy("read"))
 def api_learning_activity(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """In-flight LLM role calls, for the live spinner."""
     return _run(action_learning_activity, conn)
 
 
-@app.get("/learning/intents", response_class=JSONResponse)
+@app.get("/learning/intents", response_class=JSONResponse,
+         operation_id="learning_intents", openapi_extra=mcp_policy("read"))
 def api_learning_intents(limit: int = 200, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """What the loop decided each turn, and why — blocked decisions included."""
     return _run(action_learning_intents, conn, limit)
 
 
-@app.get("/learning/llm-usage", response_class=JSONResponse)
+@app.get("/learning/llm-usage", response_class=JSONResponse,
+         operation_id="learning_llm_usage", openapi_extra=mcp_policy("read"))
 def api_learning_llm_usage(limit: int = 500, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Tokens and cost of the subsystem's own LLM calls, by role."""
     return _run(action_learning_llm_usage, conn, limit)
 
 
-@app.get("/learning/budget", response_class=JSONResponse)
+@app.get("/learning/budget", response_class=JSONResponse,
+         operation_id="learning_budget", openapi_extra=mcp_policy("read"))
 def api_learning_budget(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """The spend ceiling and what remains of it."""
     return _run(action_learning_budget, conn)
 
 
-@app.get("/learning/targets", response_class=JSONResponse)
+@app.get("/learning/targets", response_class=JSONResponse,
+         operation_id="learning_targets", openapi_extra=mcp_policy("read"))
 def api_learning_targets(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Strategy documents and instances to pick from, with the live ones flagged."""
     return _run(action_learning_targets, conn)
 
 
-@app.get("/learning/permissions", response_class=JSONResponse)
+@app.get("/learning/permissions", response_class=JSONResponse,
+         operation_id="learning_permissions", openapi_extra=mcp_policy("read"))
 def api_learning_permissions(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """The action-class x rung permission matrix and the document allowlist."""
     return _run(action_learning_permissions, conn)
 
 
-@app.get("/learning/hypotheses", response_class=JSONResponse)
+@app.get("/learning/hypotheses", response_class=JSONResponse,
+         operation_id="learning_hypotheses", openapi_extra=mcp_policy("read"))
 def api_learning_hypotheses(limit: int = 200, target: str = None, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """The hypothesis ledger, rejections included."""
     return _run(action_learning_hypotheses, conn, limit, target)
 
 
-@app.get("/learning/approvals", response_class=JSONResponse)
+@app.get("/learning/approvals", response_class=JSONResponse,
+         operation_id="learning_approvals", openapi_extra=mcp_policy("read"))
 def api_learning_approvals(limit: int = 200, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """The approval queue; live-rung proposals are pinned first."""
     return _run(action_learning_approvals, conn, limit)
 
 
-@app.post("/learning/approvals/{approval_id}", response_class=JSONResponse)
+@app.post("/learning/approvals/{approval_id}", response_class=JSONResponse,
+          operation_id="learning_decide_approval", openapi_extra=mcp_policy("irreversible"))
 def api_learning_decide_approval(approval_id: str, body: LearningApprovalBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Approve or reject a pending proposal."""
     return _run(action_learning_decide_approval, conn, approval_id, body.decision, body.reason or "", str(current_user.get("username") or "operator"))
 
 
-@app.get("/learning/roles", response_class=JSONResponse)
+@app.get("/learning/roles", response_class=JSONResponse,
+         operation_id="learning_roles", openapi_extra=mcp_policy("read"))
 def api_learning_roles(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Which AI roles are configured and with which model."""
     return _run(action_learning_roles, conn)
 
 
-@app.get("/learning/reports", response_class=JSONResponse)
+@app.get("/learning/reports", response_class=JSONResponse,
+         operation_id="learning_reports", openapi_extra=mcp_policy("read"))
 def api_learning_reports(limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Analyst narrative reports."""
     return _run(action_learning_reports, conn, limit)
 
 
-@app.get("/learning/noise-floors", response_class=JSONResponse)
+@app.get("/learning/noise-floors", response_class=JSONResponse,
+         operation_id="learning_noise_floors", openapi_extra=mcp_policy("read"))
 def api_learning_noise_floors(limit: int = 200, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Measured dispersion per target. No floor means nothing is promotable."""
     return _run(action_learning_noise_floors, conn, limit)
 
 
-@app.get("/learning/experiments", response_class=JSONResponse)
+@app.get("/learning/experiments", response_class=JSONResponse,
+         operation_id="learning_experiments", openapi_extra=mcp_policy("read"))
 def api_learning_experiments(limit: int = 100, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """The pre-registration ledger, refused and failed specs included."""
     return _run(action_learning_experiments, conn, limit)
 
 
-@app.get("/learning/outcomes/{run_id}", response_class=JSONResponse)
+@app.get("/learning/outcomes/{run_id}", response_class=JSONResponse,
+         operation_id="learning_outcomes", openapi_extra=mcp_policy("read"))
 def api_learning_outcomes(run_id: str, limit: int = 2000, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Forward outcomes for one run, including the refusals."""
     return _run(action_learning_outcomes, conn, run_id, limit)
 
 
-@app.get("/learning/levers", response_class=JSONResponse)
+@app.get("/learning/levers", response_class=JSONResponse,
+         operation_id="learning_levers", openapi_extra=mcp_policy("read"))
 def api_learning_levers(strategy_id: str = None, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """The tunable surface derived from every strategy's declared schema."""
     return _run(action_learning_levers, conn, strategy_id)
 
 
-@app.post("/learning/findings/{finding_id}/status", response_class=JSONResponse)
+@app.post("/learning/findings/{finding_id}/status", response_class=JSONResponse,
+          operation_id="learning_acknowledge", openapi_extra=mcp_policy("write"))
 def api_learning_acknowledge(finding_id: str, body: LearningStatusBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Acknowledge or resolve a finding so the open counter can decrease."""
     return _run(action_learning_acknowledge, conn, finding_id, body.status)
 
 
-@app.get("/learning/control", response_class=JSONResponse)
+@app.get("/learning/control", response_class=JSONResponse,
+         operation_id="learning_get_control", openapi_extra=mcp_policy("read"))
 def api_learning_get_control(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Engine on/off plus the operator-settable learning config."""
     return _run(action_learning_get_control, conn)
 
 
-@app.post("/learning/control", response_class=JSONResponse)
+@app.post("/learning/control", response_class=JSONResponse,
+          operation_id="learning_set_control", openapi_extra=mcp_policy("write", cost=True))
 def api_learning_set_control(body: LearningControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Start/stop the self-learning engine and patch its config."""
     return _run(action_learning_set_control, conn, body.running, body.config)
 
 
-@app.post("/agent/runs/{log_id}/force-stop", response_class=JSONResponse)
+@app.post("/agent/runs/{log_id}/force-stop", response_class=JSONResponse,
+          operation_id="agent_run_force_stop", openapi_extra=mcp_policy("write"))
 def api_agent_run_force_stop(log_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Manually mark a stale 'running' agent cycle log entry as stopped."""
     return _run(action_agent_run_force_stop, conn, log_id)
@@ -4727,19 +4802,22 @@ def api_agent_run_force_stop(log_id: str, conn=Depends(conn_dependency), current
 # --- Daily Digest Engine ---
 
 
-@app.get("/digest/control", response_class=JSONResponse)
+@app.get("/digest/control", response_class=JSONResponse,
+         operation_id="digest_control_get", openapi_extra=mcp_policy("read"))
 def api_digest_control_get(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Get daily digest engine status: running, send_now, last_sent_at, last_morning_at, last_evening_at."""
     return _run(action_digest_control_get, conn)
 
 
-@app.post("/digest/control", response_class=JSONResponse)
+@app.post("/digest/control", response_class=JSONResponse,
+          operation_id="digest_control_set", openapi_extra=mcp_policy("write", cost=True))
 def api_digest_control_set(body: DigestControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Start or stop the digest engine (running), or set send_now to trigger an immediate send."""
     return _run(action_digest_control_set, conn, body.running, body.send_now)
 
 
-@app.post("/digest/send-now", response_class=JSONResponse)
+@app.post("/digest/send-now", response_class=JSONResponse,
+          operation_id="digest_send_now", openapi_extra=mcp_policy("write", cost=True))
 def api_digest_send_now(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Trigger the digest engine to send a brief immediately (morning-style summary to #briefs)."""
     return _run(action_digest_trigger_send_now, conn)
@@ -4748,13 +4826,15 @@ def api_digest_send_now(conn=Depends(conn_dependency), current_user: dict = Depe
 # --- Discover Engine ---
 
 
-@app.get("/discover/control", response_class=JSONResponse)
+@app.get("/discover/control", response_class=JSONResponse,
+         operation_id="discover_control_get", openapi_extra=mcp_policy("read"))
 def api_discover_control_get(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Get discover engine status: running and terminate."""
     return _run(action_discover_control_get, conn)
 
 
-@app.post("/discover/control", response_class=JSONResponse)
+@app.post("/discover/control", response_class=JSONResponse,
+          operation_id="discover_control_set", openapi_extra=mcp_policy("write", cost=True))
 def api_discover_control_set(body: DiscoverControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Start or stop the discover engine."""
     return _run(action_discover_control_set, conn, body.running)
@@ -4763,13 +4843,15 @@ def api_discover_control_set(body: DiscoverControlBody, conn=Depends(conn_depend
 # --- Graph Nexus (server-controlled subprocess) ---
 
 
-@app.get("/nexus/control", response_class=JSONResponse)
+@app.get("/nexus/control", response_class=JSONResponse,
+         operation_id="nexus_control_get", openapi_extra=mcp_policy("read"))
 def api_nexus_control_get(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Get Graph Nexus service control state (running)."""
     return _run(action_nexus_control_get, conn)
 
 
-@app.post("/nexus/control", response_class=JSONResponse)
+@app.post("/nexus/control", response_class=JSONResponse,
+          operation_id="nexus_control_set", openapi_extra=mcp_policy("write", cost=True))
 def api_nexus_control_set(body: NexusControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Start or stop the Graph Nexus service. Optional phase selectors accept execution-order 1-14 or labels like 2B / 6B."""
     return _run(
@@ -4790,19 +4872,22 @@ def api_nexus_control_set(body: NexusControlBody, conn=Depends(conn_dependency),
     )
 
 
-@app.get("/nexus/status", response_class=JSONResponse)
+@app.get("/nexus/status", response_class=JSONResponse,
+         operation_id="nexus_status", openapi_extra=mcp_policy("read"))
 def api_nexus_status(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Comprehensive Graph Nexus status: control, graph build progress, SEC EDGAR scraper progress, graph_built."""
     return _run(action_nexus_status, conn)
 
 
-@app.get("/nexus/cache", response_class=JSONResponse)
+@app.get("/nexus/cache", response_class=JSONResponse,
+         operation_id="nexus_cache", openapi_extra=mcp_policy("never"))
 def api_nexus_cache(current_user: dict = Depends(get_current_user)):
     """List top-level cache entries from the mounted Nexus cache root or the running Nexus container."""
     return action_nexus_cache_entries()
 
 
-@app.post("/nexus/rebuild", response_class=JSONResponse)
+@app.post("/nexus/rebuild", response_class=JSONResponse,
+          operation_id="nexus_rebuild", openapi_extra=mcp_policy("irreversible", cost=True))
 def api_nexus_rebuild(body: NexusRebuildBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Queue a Nexus rebuild. Optionally select destructive mode and/or delete selected cache entries from the mounted cache root or the running Nexus container before restart."""
     if not body.confirm:
@@ -4816,7 +4901,8 @@ def api_nexus_rebuild(body: NexusRebuildBody, conn=Depends(conn_dependency), cur
     )
 
 
-@app.post("/nexus/delete-edges", response_class=JSONResponse)
+@app.post("/nexus/delete-edges", response_class=JSONResponse,
+          operation_id="nexus_delete_edges", openapi_extra=mcp_policy("irreversible"))
 def api_nexus_delete_edges(body: NexusDeleteBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Delete selected Nexus graph phase outputs and track live progress through the Nexus control document."""
     return _run(action_nexus_delete_edges, conn, body.selected_phases)
@@ -4824,25 +4910,29 @@ def api_nexus_delete_edges(body: NexusDeleteBody, conn=Depends(conn_dependency),
 
 # ── Market Trends ─────────────────────────────────────────────────────────────
 
-@app.get("/trends", response_class=JSONResponse)
+@app.get("/trends", response_class=JSONResponse,
+         operation_id="list_trends", openapi_extra=mcp_policy("read"))
 def api_list_trends(instance_id: Optional[str] = None, status: Optional[str] = "active", conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """List market trends tracked by the nexus strategy. Filter by instance_id and/or status."""
     return _run(action_list_trends, conn, instance_id=instance_id, status=status)
 
 
-@app.get("/trends/{trend_id}", response_class=JSONResponse)
+@app.get("/trends/{trend_id}", response_class=JSONResponse,
+         operation_id="get_trend", openapi_extra=mcp_policy("read"))
 def api_get_trend(trend_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Get a single trend by its ID."""
     return _run(action_get_trend, conn, trend_id)
 
 
-@app.post("/trends/{trend_id}/end", response_class=JSONResponse)
+@app.post("/trends/{trend_id}/end", response_class=JSONResponse,
+          operation_id="end_trend", openapi_extra=mcp_policy("irreversible"))
 def api_end_trend(trend_id: str, body: EndTrendBody = EndTrendBody(), conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """End an active trend. Optionally provide a reason."""
     return _run(action_end_trend, conn, trend_id, reason=body.reason)
 
 
-@app.delete("/trends/{trend_id}", response_class=JSONResponse)
+@app.delete("/trends/{trend_id}", response_class=JSONResponse,
+            operation_id="delete_trend", openapi_extra=mcp_policy("irreversible"))
 def api_delete_trend(trend_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Delete a trend by its ID."""
     return _run(action_delete_trend, conn, trend_id)
@@ -4850,13 +4940,15 @@ def api_delete_trend(trend_id: str, conn=Depends(conn_dependency), current_user:
 
 # ── Discovered Stocks ──────────────────────────────────────────────────────────
 
-@app.get("/discovered", response_class=JSONResponse)
+@app.get("/discovered", response_class=JSONResponse,
+         operation_id="list_discovered", openapi_extra=mcp_policy("read"))
 def api_list_discovered(instance_id: Optional[str] = None, status: Optional[str] = "active", conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """List stocks discovered by the nexus trend tracking engine. Filter by instance_id and/or status."""
     return _run(action_list_discovered_stocks, conn, instance_id=instance_id, status=status)
 
 
-@app.delete("/discovered/{instance_id}/{ticker}", response_class=JSONResponse)
+@app.delete("/discovered/{instance_id}/{ticker}", response_class=JSONResponse,
+            operation_id="remove_discovered", openapi_extra=mcp_policy("irreversible"))
 def api_remove_discovered(instance_id: str, ticker: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Remove a discovered stock from an instance (marks it as removed)."""
     return _run(action_remove_discovered_stock, conn, instance_id, ticker)
@@ -7434,7 +7526,8 @@ def api_llm_usage_by_backtest(
     return _llm_usage_by_backtest(range_str=range, limit=limit, conn=conn)
 
 
-@app.get("/backtests/{backtest_id}/llm-cost", response_class=JSONResponse)
+@app.get("/backtests/{backtest_id}/llm-cost", response_class=JSONResponse,
+         operation_id="backtest_llm_cost", openapi_extra=mcp_policy("read"))
 def api_backtest_llm_cost(
     backtest_id: str,
     conn=Depends(conn_dependency),

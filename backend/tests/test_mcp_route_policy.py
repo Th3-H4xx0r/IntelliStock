@@ -45,7 +45,8 @@ ANNOTATED_PREFIXES = ("/health", "/help", "/auth/", "/onboarding/", "/chatbot/",
     "/llm-usage/", "/benzinga/", "/notification-preferences", "/push/", "/notifications/", "/tickers",
     "/prices", "/history", "/app-updates/", "/ota/", "/codex/", "/claude/", "/admin/", "/ollama/",
     "/bedrock/", "/openrouter/", "/kalshi/img", "/instances", "/live-commands/", "/config/", "/strategies",
-    "/models", "/widget/", "/nexus/config/")
+    "/models", "/widget/", "/nexus/config/", "/backtests", "/backtest-evidence/", "/trend-research/",
+    "/nexus-graph-builds", "/agent/", "/learning/", "/digest/", "/discover/", "/nexus/", "/trends", "/discovered")
 PENDING = ("/instances/{instance_id}/kalshi/",)   # path prefixes inside an annotated prefix that a later batch owns
 
 
@@ -137,6 +138,12 @@ def test_spec_named_live_routes_are_gated():
 def test_model_writes_always_need_approval():          # lead ruling
     for m, path in (("POST", "/models"), ("PUT", "/models/{model_id}"), ("DELETE", "/models/{model_id}")):
         assert [_policy(r)["class"] for r in _api_routes() if r.path == path and m in r.methods] == ["irreversible"]
+
+
+def test_cost_routes_are_exactly_the_paid_work():
+    cost = {(m, r.path) for r in _annotated() for m in r.methods if _policy(r).get("cost")}
+    assert ("POST", "/backtests") in cost and ("POST", "/trend-research/jobs") in cost
+    assert ("POST", "/backtests/{backtest_id}/stop") not in cost
 
 
 class _ProbeBody(BaseModel):
