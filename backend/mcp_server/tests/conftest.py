@@ -13,6 +13,7 @@ __init__.py when it sets up the package node and puts backend/ at sys.path[0]
 to do so.
 """
 import atexit
+import base64
 import os
 import sys
 import tempfile
@@ -67,3 +68,26 @@ class FakeClock:
 @pytest.fixture
 def clock():
     return FakeClock()
+
+
+@pytest.fixture
+def env(tmp_path):
+    """A complete, valid MCP environment; tests mutate their own copy."""
+    return {
+        "MCP_PUBLIC_BASE": "https://s7.tail.ts.net:8443",
+        "MCP_RP_ID": "s7.tail.ts.net",
+        "MCP_API_BASE": "http://api:8012",
+        "MCP_SERVICE_TOKEN": "test-service-token-" + "0123456789abcdef" * 2,
+        "MCP_DATA_DIR": str(tmp_path),
+        "MCP_JARVIS_CLIENT_ID": "jarvis",
+        "MCP_JARVIS_REDIRECT_URI": "http://127.0.0.1:33418/callback",
+        "MCP_TOTP_ENC_KEY": base64.b64encode(bytes(range(32))).decode("ascii"),
+        "MCP_LOG_LEVEL": "info",
+    }
+
+
+@pytest.fixture
+def settings(env):
+    from mcp_server.config import load_settings
+
+    return load_settings(env)
