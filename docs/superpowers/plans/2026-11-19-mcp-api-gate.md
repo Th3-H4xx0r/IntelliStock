@@ -1392,7 +1392,7 @@ def test_main_tail_calls_serve():                                 # source tail 
 
 ## Appendix A — route classification (origin/main 4420fea6: 255 `@app` routes + 6 `app_updates` routes)
 
-Columns: `target` is the `mcp_policy(target=...)` argument; `cost` true means `cost=True`; **+doc** means "add a one-line docstring". The operation_id is the tool name when there is one, otherwise the handler name without `api_`. Totals: read 130, write 29, money 18, irreversible 30, never 54.
+Columns: `target` is the `mcp_policy(target=...)` argument; `cost` true means `cost=True`; **+doc** means "add a one-line docstring". The operation_id is the tool name when there is one, otherwise the handler name without `api_`. Totals: read 130, write 28, money 18, irreversible 31, never 54.
 
 Routes added by this plan (Tasks 10, 12, 13, 16):
 
@@ -1609,7 +1609,7 @@ Routes added by this plan (Tasks 10, 12, 13, 16):
 | learning_levers | GET /learning/levers | read |  |  |  |  |
 | learning_acknowledge | POST /learning/findings/{finding_id}/status | write |  |  |  |  |
 | learning_get_control | GET /learning/control | read |  |  |  |  |
-| learning_set_control | POST /learning/control | write |  |  | true |  |
+| learning_set_control | POST /learning/control | irreversible |  |  | true |  |
 | agent_run_force_stop | POST /agent/runs/{log_id}/force-stop | write |  |  |  |  |
 | digest_control_get | GET /digest/control | read |  |  |  |  |
 | digest_control_set | POST /digest/control | write |  |  | true |  |

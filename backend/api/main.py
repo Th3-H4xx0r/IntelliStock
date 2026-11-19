@@ -4786,7 +4786,7 @@ def api_learning_get_control(conn=Depends(conn_dependency), current_user: dict =
 
 
 @app.post("/learning/control", response_class=JSONResponse,
-          operation_id="learning_set_control", openapi_extra=mcp_policy("write", cost=True))
+          operation_id="learning_set_control", openapi_extra=mcp_policy("irreversible", cost=True))
 def api_learning_set_control(body: LearningControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Start/stop the self-learning engine and patch its config."""
     return _run(action_learning_set_control, conn, body.running, body.config)

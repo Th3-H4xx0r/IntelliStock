@@ -140,6 +140,11 @@ def test_model_writes_always_need_approval():          # lead ruling
         assert [_policy(r)["class"] for r in _api_routes() if r.path == path and m in r.methods] == ["irreversible"]
 
 
+def test_learning_control_always_needs_approval():     # lead ruling: it holds the budget, permissions and mode
+    (route,) = [r for r in _api_routes() if r.path == "/learning/control" and "POST" in r.methods]
+    assert _policy(route) == {"class": "irreversible", "cost": True}
+
+
 def test_cost_routes_are_exactly_the_paid_work():
     cost = {(m, r.path) for r in _annotated() for m in r.methods if _policy(r).get("cost")}
     assert ("POST", "/backtests") in cost and ("POST", "/trend-research/jobs") in cost
