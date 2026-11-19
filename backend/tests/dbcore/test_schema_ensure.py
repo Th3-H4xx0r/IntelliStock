@@ -34,7 +34,8 @@ def test_all_tables_has_the_127_live_tables_plus_the_two_split_tables():
     # 2026-11-07: +1 for the forward-test paper mirror (ForwardMirrorLedger).
     # 2026-11-14: +2 for the why-it-moved analysis (MoveEvents, AppSettings).
     # 2026-11-18: +1 for operator-triggered wheel runs (SwingWheelRuns).
-    assert len(schema.ALL_TABLES) == 147 + len(_LAZILY_CREATED)
+    # 2026-11-19: +4 for the MCP gate (McpApprovals, McpApprovalDevices, McpIdempotency, McpAudit).
+    assert len(schema.ALL_TABLES) == 151 + len(_LAZILY_CREATED)
     assert len(set(schema.ALL_TABLES)) == len(schema.ALL_TABLES)
     for name in ("BacktestResults", "PriceHistory", "GraphNexusTradeContexts",
                  "kalshi_decisions", "sports_fixtures", "Users",

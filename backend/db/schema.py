@@ -110,6 +110,7 @@ ALL_TABLES: tuple = (
     "LearningObservationRollups", "LearningObservations", "LearningOutcomes",
     "LearningReports", "LiveBootAudit", "LiveCommands", "LiveDecisionAudit",
     "LiveOrderLifecycle", "LiveOrderWAL", "LivePrices", "LivePricesStocks", "LiveState",
+    "McpApprovalDevices", "McpApprovals", "McpAudit", "McpIdempotency",
     "MlNewsLLMPromptCache", "Models", "MoveEvents", "NewsLLM", "NewsLLMCache", "NewsLLMPromptCache",
     "NewsRaw", "NewsScored", "NexusGraphBuilds", "NexusRuntimeState",
     "NexusStrategyCache", "NotificationPreferences", "OutlierGraphPeers",
@@ -332,6 +333,23 @@ _SPECS = [
     TableSpec("MoveEvents", prefix_fields=("id",)),
     TableSpec("AppSettings"),
     TableSpec("LiveBootAudit", indexed_fields=("instance_id",), prefix_fields=("id",)),
+    # MCP gate (docs/superpowers/specs/2026-11-19-intellistock-mcp-contract.md
+    # §6), reached only through the gate's own modules. McpApprovals holds
+    # held live-money/irreversible calls awaiting a signed device decision;
+    # McpApprovalDevices the enrolled signing keys (id = device_id). Both keyed
+    # by uuid4 hex. McpIdempotency is keyed sha256(client + "\x00" + key) hex
+    # and lives 24 h; McpAudit is one row per MCP call, kept 365 days.
+    # Timestamps are fixed-width ISO-UTC strings, so "C" order is chronological.
+    TableSpec("McpApprovals", indexed_fields=("status", "user_id", "created_at")),
+    TableSpec("McpApprovalDevices", indexed_fields=("user_id",)),
+    TableSpec("McpIdempotency", notify=False, indexed_fields=("created_at",),
+              retention=RetentionSpec(field="created_at",
+                                      days_env="RETAIN_MCP_IDEMPOTENCY_DAYS",
+                                      default_days=1)),
+    TableSpec("McpAudit", notify=False,
+              indexed_fields=("ts", "user_id", "operation_id"),
+              retention=RetentionSpec(field="ts", days_env="RETAIN_MCP_AUDIT_DAYS",
+                                      default_days=365)),
     # r.now() wrote a native time on these; the ported writer stores an
     # ISO-8601 string and time_fields decodes it back to a tz-aware datetime,
     # so readers see the same Python type they saw under RethinkDB.
