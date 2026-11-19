@@ -12,17 +12,29 @@ MCP_ALLOWED_CIDR disables the listener rather than widening it.
 
 Every hash the gate compares (body_sha256, argument digests, the schema hash) is
 the sha256 hex of ``canonical_json``, the one formula the contract pins.
+
+``resolve_money_state`` says how much real money a money route's target puts at
+risk, read straight from the store with the rules of
+``interactive_utils.action_learning_targets`` (plan Decision 2). It fails closed:
+whatever it cannot establish, a store error included, is "unknown", and
+``approval_reason`` holds every live, unknown or protected call for approval.
 """
 from __future__ import annotations
 
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+from db import store
+from kalshi.mode import is_real_mode
+
+_log = logging.getLogger(__name__)
 
 POLICY_CLASSES = ("read", "write", "money", "irreversible", "never")
 NON_READ_CLASSES = frozenset({"write", "money", "irreversible"})
@@ -186,3 +198,181 @@ def iso_utc(dt: datetime) -> str:
 def parse_iso_utc(s: str) -> datetime:
     """Inverse of iso_utc; ValueError on any other shape."""
     return datetime.strptime(s, _ISO_FORMAT).replace(tzinfo=timezone.utc)
+
+
+# -- money state --------------------------------------------------------------
+
+_APPROVAL_MONEY_STATES = frozenset({"live", "unknown", "protected"})
+
+# Combination order for the monetary part; "protected" is applied afterwards.
+_MONEY_RANK = {"none": 0, "paper": 1, "unknown": 2, "live": 3}
+_INSTANCES = "Instances"
+_BROKERAGES = "BrokerageAccounts"
+_STRATEGIES = "Strategies"
+
+
+def _worst(*states: str) -> str:
+    return max(states, key=_MONEY_RANK.__getitem__)
+
+
+def _kalshi_env(row: object) -> str:
+    env = row.get("kalshi_environment") if isinstance(row, dict) else None
+    return env.strip().lower() if isinstance(env, str) else ""
+
+
+def brokerage_flag_money(row: dict | None) -> str:
+    """What a BrokerageAccounts row says on its own: "paper", "live" or "unknown"."""
+    if not isinstance(row, dict):
+        return "unknown"
+    paper = row.get("alpaca_paper")
+    if paper is True:
+        return "paper"
+    if paper is False:
+        return "live"
+    env = _kalshi_env(row)
+    if env == "demo":
+        return "paper"
+    if env in ("live", "prod"):
+        return "live"
+    return "unknown"
+
+
+def instance_money(inst: dict, brokerages: Mapping[str, dict | None]) -> str:
+    """An Instances row's money: "none" when unlinked, else "paper", "live" or "unknown".
+
+    A Kalshi account is paper or real per instance, so a Kalshi instance reads
+    its brokerage's environment and its own kalshi_config, never alpaca_paper.
+    Demo counts as paper: its orders execute, on fake money (plan Decision 3).
+    """
+    brokerage_id = inst.get("brokerage_id")
+    if not brokerage_id:
+        return "none"
+    row = brokerages.get(str(brokerage_id))
+    if str(inst.get("kind") or "") != "kalshi":
+        return brokerage_flag_money(row)
+    env = _kalshi_env(row)
+    if env == "demo":
+        return "paper"
+    if env in ("live", "prod"):
+        cfg = inst.get("kalshi_config") or {}
+        real = is_real_mode(env, bool(cfg.get("live_enabled")), bool(cfg.get("paper_mode")))
+        return "live" if real else "paper"
+    return "unknown"
+
+
+def _target_id(value: object) -> str | None:
+    """A target id as text, or None when it is absent; ValueError on any other type."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError("a target id must be a string or an integer")
+    return str(value)
+
+
+def _int_id(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _account_number(row: object) -> str:
+    number = row.get("alpaca_account_number") if isinstance(row, dict) else None
+    return str(number or "").strip().upper()
+
+
+def _resolve_money_state(policy: dict, path_params: Mapping[str, str], body: object,
+                         cfg: McpConfig) -> str:
+    (kind, field_name), = policy["target"].items()
+    body_map = body if isinstance(body, dict) else {}
+    value = _target_id(path_params.get(field_name) or body_map.get(field_name))
+    instances = store.run(_INSTANCES)
+    brokerages: dict[str, dict | None] = {}
+    touched_instances: set[str] = set()
+    touched_brokerages: set[str] = set()
+
+    def brokerage_row(brokerage_id: str) -> dict | None:
+        if brokerage_id not in brokerages:
+            brokerages[brokerage_id] = store.get(_BROKERAGES, brokerage_id)
+        touched_brokerages.add(brokerage_id)
+        return brokerages[brokerage_id]
+
+    def money_of(inst: dict) -> str:
+        touched_instances.add(str(inst.get("id")))
+        if inst.get("brokerage_id"):
+            brokerage_row(str(inst["brokerage_id"]))
+        return instance_money(inst, brokerages)
+
+    def brokerage_money(brokerage_id: str) -> str:
+        # An account is as risky as its own flag and every instance trading on it.
+        flag = brokerage_flag_money(brokerage_row(brokerage_id))
+        users = [i for i in instances if str(i.get("brokerage_id") or "") == brokerage_id]
+        return _worst(flag, *(money_of(i) for i in users))
+
+    if value is None:
+        base = "none" if kind == "brokerage" else "unknown"
+    elif kind == "instance":
+        row = next((i for i in instances if str(i.get("id")) == value), None)
+        base = "unknown" if row is None else money_of(row)
+    elif kind == "brokerage":
+        base = brokerage_money(value)
+    elif kind == "strategy":
+        # Strategies is int-keyed, and the route parses the path as an int: "0200" is 200.
+        strategy_id = _int_id(value)
+        if strategy_id is None or store.get(_STRATEGIES, strategy_id) is None:
+            base = "unknown"
+        else:
+            users = [i for i in instances if _int_id(i.get("strategy_id")) == strategy_id]
+            base = _worst("none", *(money_of(i) for i in users))
+    else:
+        raise ValueError(f"unknown target kind {kind!r}")
+
+    # Escalators (plan Decision 4): repointing at another account, or a Kalshi
+    # paper_mode a pydantic Optional[bool] reads as False ("false" and 0 included).
+    escalating = _target_id(body_map.get("brokerage_id"))
+    if escalating is not None and not (kind == "brokerage" and escalating == value):
+        base = _worst(base, brokerage_money(escalating))
+    paper_mode = body_map.get("paper_mode")
+    if paper_mode is not None and paper_mode is not True:
+        base = _worst(base, "live")
+
+    if base in ("live", "unknown"):
+        return base
+    protected = (not touched_instances.isdisjoint(cfg.protected_instances)
+                 or any(_account_number(brokerages.get(b)) in cfg.protected_accounts
+                        for b in touched_brokerages))
+    return "protected" if protected else base
+
+
+def resolve_money_state(policy: dict, path_params: Mapping[str, str], body: object,
+                        cfg: McpConfig) -> str:
+    """The money state of a money route's target: "live", "unknown", "protected",
+    "paper" or "none".
+
+    The target is the policy's one target field, from the path or else the body.
+    live > unknown > paper > none; "protected" (a touched instance or account the
+    operator listed) replaces paper or none only. Any failure is "unknown".
+    """
+    try:
+        return _resolve_money_state(policy, path_params, body, cfg)
+    except Exception as exc:
+        # The type only: a message can quote request values.
+        _log.warning("mcp: money-state resolution failed (%s); treating it as unknown",
+                     type(exc).__name__)
+        return "unknown"
+
+
+def approval_reason(policy: dict, money_state: str | None) -> str | None:
+    """Why a call needs approval ("irreversible", "live", "unknown" or "protected"), or None.
+
+    A money call whose state is neither paper nor none (a missing or unrecognized
+    one included) is held as "unknown", never let through.
+    """
+    cls = policy.get("class")
+    if cls == "irreversible":
+        return "irreversible"
+    if cls != "money" or money_state in ("paper", "none"):
+        return None
+    return money_state if money_state in _APPROVAL_MONEY_STATES else "unknown"
