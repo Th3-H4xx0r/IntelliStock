@@ -40,7 +40,7 @@ _CAMEL_WORD = re.compile(r"([a-z0-9])([A-Z])")         # apiKey -> api_Key
 OUTCOMES = frozenset({
     "ok", "error", "unauthenticated", "forbidden", "approval_required",
     "idempotency_required", "idempotency_conflict", "idempotent_replay", "capped",
-    "too_large", "unsupported_media", "executed_approved", "replay_refused", "auth_event",
+    "too_large", "unsupported_media", "rejected", "executed_approved", "replay_refused", "auth_event",
     "verify_password_ok", "verify_password_failed", "verify_password_limited",
 })
 

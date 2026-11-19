@@ -24,6 +24,7 @@ from mcp_helpers import (
 from mcp_policy import canonical_request_sha256
 
 JSON = {"Content-Type": "application/json"}
+UNPROCESSABLE = {"detail": "mcp: request body must be JSON the gate can process"}
 
 
 @pytest.fixture(autouse=True)
@@ -247,6 +248,32 @@ def test_non_json_body_is_415(probe, store, content, headers):
     assert res.status_code == 415 and res.json() == {"detail": "mcp: JSON body required"}
     assert calls["count"].get("probe_write", 0) == 0
     assert [(r["outcome"], r["status"]) for r in _audit_rows(store)] == [("unsupported_media", 415)]
+
+
+def _nested(depth: int) -> bytes:
+    """A JSON object nested 'depth' levels deep."""
+    return ('{"a":' * depth + "1" + "}" * depth).encode()
+
+
+@pytest.mark.parametrize("content", [
+    b'{"x": "\\ud800"}',      # a lone surrogate: it parses, but cannot be UTF-8 encoded or hashed
+    _nested(65),               # one level past the bound
+    _nested(100_000),          # deep enough for the parser itself to give up
+], ids=["lone_surrogate", "depth_65", "depth_100k"])
+def test_json_the_gate_cannot_process_is_415_with_one_audit_row(probe, store, content):
+    c, calls = probe
+    res = c.post("/probe/write", content=content, headers={**JSON, **IDEM()})
+    assert res.status_code == 415 and res.json() == UNPROCESSABLE
+    assert calls["count"].get("probe_write", 0) == 0
+    (row,) = _audit_rows(store)
+    assert (row["outcome"], row["status"], row["args_summary"], row["operation_id"]) == \
+        ("rejected", 415, "[unprocessable]", "probe_write")
+
+
+def test_nesting_at_the_bound_runs(probe):
+    c, calls = probe
+    res = c.post("/probe/write", content=_nested(64), headers={**JSON, **IDEM()})
+    assert res.status_code == 200 and calls["count"]["probe_write"] == 1
 
 
 # -- route outcomes and audit -----------------------------------------------------

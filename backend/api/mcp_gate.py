@@ -12,7 +12,8 @@ header:
   the raw socket peer and the acting user must all check out (anything else is a
   401), then the route's x-mcp policy decides (no policy or "never" is a 403).
   The body is then read whole (413 past MCP_MAX_BODY_BYTES; 415 unless it is
-  JSON sent as application/json), so the money decision, a held approval and
+  JSON sent as application/json, and also for JSON the gate cannot hash or
+  nests deeper than MAX_JSON_DEPTH), so the money decision, a held approval and
   the route all see the same bytes. A money call on a live, unknown or
   protected target, and every irreversible call, is held: a pending approval,
   a push and a 202, and the route does not run. Anything else runs with the
@@ -75,6 +76,11 @@ UNAUTHENTICATED_DETAIL = "mcp: unauthenticated"
 NOT_AVAILABLE_DETAIL = "mcp: operation not available"
 TOO_LARGE_DETAIL = "mcp: request body too large"
 JSON_REQUIRED_DETAIL = "mcp: JSON body required"
+UNPROCESSABLE_DETAIL = "mcp: request body must be JSON the gate can process"
+UNPROCESSABLE_SUMMARY = "[unprocessable]"
+# Containers nested deeper than this are refused, so nothing downstream (the
+# hash, the redaction, the route) can run out of recursion on a body.
+MAX_JSON_DEPTH = 64
 # Audited for a client that hung up before its body was complete (nginx's code).
 CLIENT_CLOSED_STATUS = 499
 # What get_current_user answers for a token it cannot decode: the service token
@@ -200,6 +206,10 @@ class _NotJson(Exception):
     """A non-empty body that is not JSON sent as application/json."""
 
 
+class _Unprocessable(Exception):
+    """JSON the gate cannot handle: nested past MAX_JSON_DEPTH, or unhashable."""
+
+
 def _declared_length(scope: Scope) -> int | None:
     values = _header_values(scope, b"content-length")
     if len(values) != 1 or not values[0].strip().isdigit():
@@ -232,12 +242,27 @@ def _reject_constant(name: str) -> object:
     raise ValueError(f"{name} is not JSON")
 
 
+def _nests_deeper_than(value: object, limit: int) -> bool:
+    """True when dicts and lists nest more than `limit` levels; iterative, so it
+    cannot run out of recursion itself."""
+    stack = [(value, 1)] if isinstance(value, (dict, list)) else []
+    while stack:
+        node, depth = stack.pop()
+        if depth > limit:
+            return True
+        children = node.values() if isinstance(node, dict) else node
+        stack.extend((child, depth + 1) for child in children if isinstance(child, (dict, list)))
+    return False
+
+
 def _json_body(scope: Scope, body: bytes) -> object:
     """The parsed body, or None for an empty one.
 
     _NotJson unless the media type is application/json and the bytes parse.
     NaN and Infinity are refused although Python reads them: they are not JSON,
     so a held call carrying one could never be stored or re-hashed by the app.
+    _Unprocessable when containers nest past MAX_JSON_DEPTH, including nesting
+    so deep that the parser itself gives up.
     """
     if not body:
         return None
@@ -246,9 +271,14 @@ def _json_body(scope: Scope, body: bytes) -> object:
     if media_type != b"application/json":
         raise _NotJson()
     try:
-        return json.loads(body, parse_constant=_reject_constant)
-    except (ValueError, RecursionError) as exc:
+        parsed = json.loads(body, parse_constant=_reject_constant)
+    except RecursionError as exc:
+        raise _Unprocessable() from exc
+    except ValueError as exc:
         raise _NotJson() from exc
+    if _nests_deeper_than(parsed, MAX_JSON_DEPTH):
+        raise _Unprocessable()
+    return parsed
 
 
 def _buffered_receive(body: bytes, receive: Receive) -> Receive:
@@ -396,19 +426,26 @@ class McpGateMiddleware:
             await _audit(scope, started, outcome="error", status=CLIENT_CLOSED_STATUS,
                          principal=principal, operation_id=operation_id)
             return
+        # Parse, hash and summarize under one guard. JSON that parses but cannot
+        # be hashed (a lone surrogate escape cannot be UTF-8 encoded) is refused
+        # like JSON nested too deep, and still gets its one audit row.
         try:
             body_obj = _json_body(scope, body)
+            query = _query(scope)
+            args_sha256 = canonical_request_sha256(scope["method"], scope["path"], query, body_obj)
+            args_summary = summarize_args(query, body_obj)
         except _NotJson:
             await self._refuse(scope, receive, send, started, principal, operation_id,
                                status=415, detail=JSON_REQUIRED_DETAIL, outcome="unsupported_media")
             return
-        query = _query(scope)
+        except (_Unprocessable, ValueError, RecursionError):
+            await self._refuse(scope, receive, send, started, principal, operation_id,
+                               status=415, detail=UNPROCESSABLE_DETAIL, outcome="rejected",
+                               args_summary=UNPROCESSABLE_SUMMARY)
+            return
         idempotency_key = _idempotency_key(scope)
-        audit_fields: dict = {
-            "args_sha256": canonical_request_sha256(scope["method"], scope["path"], query, body_obj),
-            "args_summary": summarize_args(query, body_obj),
-            "idempotency_key": idempotency_key,
-        }
+        audit_fields: dict = {"args_sha256": args_sha256, "args_summary": args_summary,
+                              "idempotency_key": idempotency_key}
 
         # [Task 14: the Idempotency-Key check, lookup and claim go here.]
         # [Task 15: the rate caps, the daily cost cap and the backtest slot go here.]
@@ -460,10 +497,10 @@ class McpGateMiddleware:
 
     async def _refuse(self, scope: Scope, receive: Receive, send: Send, started: float,
                       principal: dict, operation_id: str | None, *, status: int, detail: str,
-                      outcome: str) -> None:
+                      outcome: str, **audit_fields: object) -> None:
         await _respond(scope, receive, send, status, detail)
         await _audit(scope, started, outcome=outcome, status=status, principal=principal,
-                     operation_id=operation_id)
+                     operation_id=operation_id, **audit_fields)
 
 
 async def _create_held_approval(scope: Scope, cfg: McpConfig, *, principal: dict,

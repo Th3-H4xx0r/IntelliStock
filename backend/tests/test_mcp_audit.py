@@ -186,4 +186,4 @@ def test_write_audit_logs_a_row_the_store_rejected(monkeypatch, caplog):
 
 def test_outcomes_cover_the_gate_vocabulary():
     assert {"ok", "approval_required", "executed_approved", "auth_event",
-            "verify_password_limited"} <= OUTCOMES and len(OUTCOMES) == 17
+            "verify_password_limited", "rejected"} <= OUTCOMES and len(OUTCOMES) == 18
