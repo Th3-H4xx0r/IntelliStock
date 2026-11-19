@@ -1,0 +1,1039 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "IntelliStock API",
+    "description": "The MCP-visible operations of the IntelliStock API.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/instances/{instance_id}": {
+      "get": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "Get one instance — config, status and linked accounts",
+        "operationId": "get_instance",
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instance Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "read",
+          "tool": "get_instance"
+        }
+      },
+      "head": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "Check that an instance exists",
+        "operationId": "head_instance",
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instance Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "read"
+        }
+      }
+    },
+    "/backtests": {
+      "get": {
+        "tags": [
+          "backtests"
+        ],
+        "summary": "List backtests",
+        "description": "Newest first. Page with limit and offset.",
+        "operationId": "list_backtests",
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Instance Id"
+            },
+            "description": "Only this instance's backtests."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "running",
+                    "finished",
+                    "failed"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "read",
+          "tool": "list_backtests"
+        }
+      },
+      "post": {
+        "tags": [
+          "backtests"
+        ],
+        "summary": "Start a backtest",
+        "description": "Queues a backtest for an instance. It runs for minutes to hours and spends LLM budget.",
+        "operationId": "create_backtest",
+        "parameters": [
+          {
+            "name": "x-trace-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Trace-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BacktestCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "write",
+          "tool": "create_backtest",
+          "cost": true
+        }
+      }
+    },
+    "/backtests/{backtest_id}/logs": {
+      "get": {
+        "tags": [
+          "backtests"
+        ],
+        "summary": "Backtest log lines",
+        "description": "The engine log of one backtest. A whole run reaches tens of megabytes; page with since_line and lines.",
+        "operationId": "get_backtest_logs",
+        "parameters": [
+          {
+            "name": "backtest_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Backtest Id"
+            }
+          },
+          {
+            "name": "since_line",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since Line"
+            }
+          },
+          {
+            "name": "lines",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 20000,
+              "minimum": 1,
+              "default": 2000,
+              "title": "Lines"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BacktestLogs"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "read",
+          "tool": "get_backtest_logs"
+        }
+      }
+    },
+    "/instances/{instance_id}/live-command": {
+      "post": {
+        "tags": [
+          "live"
+        ],
+        "summary": "Send a live command to the broker",
+        "description": "halt, close_position or submit_order. The broker picks it up within about a second.\n\nPoll the returned command_id for the result.",
+        "operationId": "live_command",
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instance Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LiveCommandBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "money",
+          "tool": "live_command",
+          "target": {
+            "instance": "instance_id"
+          }
+        }
+      }
+    },
+    "/strategies/{strategy_id}": {
+      "delete": {
+        "tags": [
+          "strategies"
+        ],
+        "summary": "Delete a strategy",
+        "operationId": "delete_strategy",
+        "parameters": [
+          {
+            "name": "strategy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Strategy Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "irreversible",
+          "tool": "delete_strategy",
+          "target": {
+            "strategy": "strategy_id"
+          }
+        }
+      }
+    },
+    "/strategies/tree": {
+      "post": {
+        "tags": [
+          "strategies"
+        ],
+        "description": "Preview a strategy rule tree.\nValidates the nested tree and returns the flattened rule list without saving anything.",
+        "operationId": "strategy_tree",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategyNode"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "read",
+          "tool": "strategy_tree"
+        }
+      }
+    },
+    "/learning/control": {
+      "post": {
+        "tags": [
+          "learning"
+        ],
+        "summary": "Pause, resume or reset the self-learning loop",
+        "operationId": "learning_control",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LearningControl"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "irreversible",
+          "cost": true
+        }
+      }
+    },
+    "/brokerages": {
+      "get": {
+        "tags": [
+          "brokerages"
+        ],
+        "summary": "List brokerages",
+        "operationId": "list_brokerages",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "read",
+          "tool": "dup_tool"
+        }
+      }
+    },
+    "/models": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "List models",
+        "operationId": "list_models",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "read",
+          "tool": "dup_tool"
+        }
+      }
+    },
+    "/endpoints": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Search the route table",
+        "operationId": "search_routes",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Q"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "read",
+          "tool": "find_endpoints"
+        }
+      }
+    },
+    "/mcp/approvals": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "List approvals",
+        "operationId": "list_mcp_approvals",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "all"
+              ],
+              "default": "pending",
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 50,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "read",
+          "tool": "list_pending_approvals"
+        }
+      }
+    },
+    "/mcp/approvals/{id}": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "Get one approval",
+        "operationId": "get_mcp_approval",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "read",
+          "tool": "get_approval"
+        }
+      }
+    },
+    "/mcp/approvals/{id}/decision": {
+      "post": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "Approve or deny an approval",
+        "operationId": "decide_mcp_approval",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalDecision"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": {
+          "class": "never"
+        }
+      }
+    },
+    "/internal/debug/state": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Dump process state",
+        "operationId": "debug_state",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApprovalDecision": {
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": [
+              "approve",
+              "deny"
+            ],
+            "title": "Decision"
+          },
+          "body_sha256": {
+            "type": "string",
+            "title": "Body Sha256"
+          },
+          "ts": {
+            "type": "integer",
+            "title": "Ts"
+          },
+          "device_id": {
+            "type": "string",
+            "title": "Device Id"
+          },
+          "signature": {
+            "type": "string",
+            "title": "Signature"
+          }
+        },
+        "type": "object",
+        "required": [
+          "decision",
+          "body_sha256",
+          "ts",
+          "device_id",
+          "signature"
+        ],
+        "title": "ApprovalDecision"
+      },
+      "BacktestCreate": {
+        "properties": {
+          "instance_id": {
+            "type": "string",
+            "title": "Instance Id"
+          },
+          "window": {
+            "$ref": "#/components/schemas/BacktestWindow"
+          },
+          "granularity": {
+            "$ref": "#/components/schemas/Granularity",
+            "default": "900"
+          },
+          "initial_capital": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 100000,
+            "title": "Initial Capital"
+          }
+        },
+        "type": "object",
+        "required": [
+          "instance_id",
+          "window"
+        ],
+        "title": "BacktestCreate"
+      },
+      "BacktestLogs": {
+        "properties": {
+          "backtest_id": {
+            "type": "integer",
+            "title": "Backtest Id"
+          },
+          "total_lines": {
+            "type": "integer",
+            "title": "Total Lines"
+          },
+          "logs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Logs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "backtest_id",
+          "total_lines",
+          "logs"
+        ],
+        "title": "BacktestLogs"
+      },
+      "BacktestWindow": {
+        "properties": {
+          "start": {
+            "type": "string",
+            "format": "date",
+            "title": "Start"
+          },
+          "end": {
+            "type": "string",
+            "format": "date",
+            "title": "End"
+          }
+        },
+        "type": "object",
+        "required": [
+          "start",
+          "end"
+        ],
+        "title": "BacktestWindow"
+      },
+      "Granularity": {
+        "type": "string",
+        "enum": [
+          "60",
+          "300",
+          "900",
+          "3600"
+        ],
+        "title": "Granularity",
+        "description": "Bar size in seconds."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "LearningControl": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "pause",
+              "resume",
+              "reset"
+            ],
+            "title": "Action"
+          }
+        },
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "title": "LearningControl"
+      },
+      "LiveCommandBody": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "halt",
+              "close_position",
+              "submit_order"
+            ],
+            "title": "Type"
+          },
+          "payload": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payload"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "title": "LiveCommandBody"
+      },
+      "StrategyNode": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "rule": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule"
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/StrategyNode"
+            },
+            "type": "array",
+            "default": [],
+            "title": "Children"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "StrategyNode"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

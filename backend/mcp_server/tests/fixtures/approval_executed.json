@@ -1,0 +1,45 @@
+{
+ "_source": "docs/superpowers/specs/2026-11-19-intellistock-mcp-contract.md section 5, Approval object. The API stores 'result' raw and does no redaction; the MCP server redacts every result.",
+ "id": "3b8f0e2a9c4d4e1f8a7b6c5d4e3f2a1b",
+ "created_at": "2026-11-19T15:02:11Z",
+ "expires_at": "2026-11-19T15:17:11Z",
+ "status": "executed",
+ "summary": "BUY 10 TQQQ on alpaca-paper \u2014 LIVE",
+ "money_state": "live",
+ "client": "jarvis",
+ "method": "POST",
+ "path": "/brokerages/6f1c2b9e-4d3a-4e8b-9c7d-1a2b3c4d5e6f/orders",
+ "query": {},
+ "body": {
+  "symbol": "TQQQ",
+  "qty": 10,
+  "side": "buy",
+  "type": "market",
+  "time_in_force": "day"
+ },
+ "body_sha256": "5d41402abc4b2a76b9719d911017c592ae2d1f0b8f8e6a2b0c4d9e7f1a3b5c7d",
+ "result_status": 200,
+ "result": {
+  "order": {
+   "id": "b0b6dd9d-8b9b-48a9-ba46-b9d54906e415",
+   "client_order_id": "jarvis-3b8f0e2a",
+   "symbol": "TQQQ",
+   "qty": "10",
+   "filled_qty": "10",
+   "side": "buy",
+   "type": "market",
+   "time_in_force": "day",
+   "status": "filled",
+   "filled_avg_price": "78.41",
+   "submitted_at": "2026-11-19T15:03:41.204Z",
+   "filled_at": "2026-11-19T15:03:41.917Z"
+  },
+  "raw": {
+   "access_token": "pa7Qz2Lm9Xv4Rt8Ws1Ny6Ke3Hu0Jd5",
+   "token_type": "bearer",
+   "expires_in": 3600
+  }
+ },
+ "decided_at": "2026-11-19T15:03:40Z",
+ "device_id": "9c8b7a6f5e4d4c3b2a1f0e9d8c7b6a5f"
+}

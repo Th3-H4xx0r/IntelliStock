@@ -14,6 +14,14 @@ updates:
       - "dependencies"
       - "python"
 
+  - package-ecosystem: "pip"
+    directory: "/backend/mcp_server"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "python"
+
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
@@ -38,6 +46,14 @@ updates:
 
   - package-ecosystem: "docker"
     directory: "/backend"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  - package-ecosystem: "docker"
+    directory: "/backend/mcp_server"
     schedule:
       interval: "weekly"
     labels:

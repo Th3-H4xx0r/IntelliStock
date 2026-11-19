@@ -1,0 +1,15 @@
+# Runtime dependencies of the MCP server image. After editing, regenerate the lock from this directory:
+#   uv pip compile requirements.in --universal --python-version 3.11 --generate-hashes -o requirements.txt
+#   uv pip compile requirements-test.in --universal --python-version 3.11 --generate-hashes -o requirements-test.txt
+mcp==2.1.1
+mcp-types==2.1.1
+webauthn==3.0.1
+pyotp==2.12.1
+PyJWT[crypto]==2.15.1
+cryptography==50.0.2
+httpx==0.28.1
+starlette==1.10.0
+uvicorn==0.54.0
+pydantic==2.14.3
+jsonschema==4.26.0
+segno>=1.6

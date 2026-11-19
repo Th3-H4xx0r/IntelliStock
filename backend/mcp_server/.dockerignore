@@ -1,0 +1,7 @@
+# The image needs the package modules and requirements.txt; nothing else.
+tests/
+__pycache__/
+*.pyc
+requirements*.in
+requirements-test.txt
+pytest.ini

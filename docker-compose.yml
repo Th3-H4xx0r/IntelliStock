@@ -223,6 +223,66 @@ services:
         condition: service_started
       neo4j:
         condition: service_started
+    # default stays listed: declaring networks drops the implicit one, which
+    # Postgres and every other service are on. mcp_net is how the MCP server
+    # reaches the api's private MCP port.
+    networks:
+      - default
+      - mcp_net
+
+  mcp:
+    # MCP server for the operator's Jarvis agent (backend/mcp_server): its own
+    # OAuth sign-in in front of the api's private MCP port. Reachable only on
+    # 127.0.0.1:8090, which tailscale serve on the host fronts: no Traefik labels.
+    # No env_file either, so none of the stack's other secrets reach it, and no
+    # docker.sock. Until its settings are complete it idles: /healthz answers and
+    # everything else is 503. One uvicorn worker, by design (see __main__.py).
+    # Outbound it is NOT confined to the api: see RESIDUAL RISK on mcp_net below.
+    # Admin CLI: docker exec -it intellistock-mcp python -m mcp_server.admin <command>
+    build:
+      context: ./backend/mcp_server
+      dockerfile: Dockerfile
+    # Pinned tag, for the Dokploy project-slug reason given on the frontend service.
+    image: intellistock-mcp
+    container_name: intellistock-mcp
+    restart: unless-stopped
+    depends_on:
+      - api
+    # Pinned: the api's MCP port admits this one address (MCP_ALLOWED_CIDR,
+    # default 172.31.250.10/32). Change both together.
+    networks:
+      mcp_net:
+        ipv4_address: 172.31.250.10
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      # The auth store (mcp_auth.sqlite3): users, passkeys, sessions, signing keys.
+      - mcp_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    environment:
+      - MCP_API_BASE=${MCP_API_BASE:-http://api:8012}
+      - MCP_SERVICE_TOKEN=${MCP_SERVICE_TOKEN:-}
+      - MCP_PUBLIC_BASE=${MCP_PUBLIC_BASE:-}
+      - MCP_RP_ID=${MCP_RP_ID:-}
+      - MCP_DATA_DIR=/data
+      - MCP_JARVIS_CLIENT_ID=${MCP_JARVIS_CLIENT_ID:-jarvis}
+      - MCP_JARVIS_REDIRECT_URI=${MCP_JARVIS_REDIRECT_URI:-}
+      - MCP_TOTP_ENC_KEY=${MCP_TOTP_ENC_KEY:-}
+      - MCP_EXTRA_ALLOWED_HOSTS=${MCP_EXTRA_ALLOWED_HOSTS:-}
+      - MCP_LOG_LEVEL=${MCP_LOG_LEVEL:-info}
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    # Lose this before the live broker under memory pressure.
+    oom_score_adj: 1000
 
   price-service:
     image: intellistock-backend
@@ -545,3 +605,36 @@ volumes:
     name: codex_auth  # Plain name so spawned broker containers can mount it directly via Docker SDK
   app_updates: # iOS over-the-air update builds (api service only)
     name: intellistock_app_updates  # Plain name: a changed project slug must not orphan the builds
+  mcp_data: # The MCP server's auth store (mcp service only)
+    name: intellistock_mcp_data  # Plain name: a changed project slug must not orphan the enrolled sign-ins
+
+networks:
+  # The MCP server's link to the api: only api and mcp join it. The api's MCP
+  # port admits one address, 172.31.250.10 (MCP_ALLOWED_CIDR), which the mcp
+  # service pins. Docker does not keep a pinned address out of dynamic
+  # allocation, and every merge recreates the api, so ip_range confines every
+  # dynamic address (the api's included) to .128/25: nothing else can take .10
+  # and stop mcp from starting. The gateway, the host, is pinned to .1, outside
+  # MCP_ALLOWED_CIDR. The fixed name means a changed project slug cannot create
+  # a second network with an overlapping subnet.
+  #
+  # RESIDUAL RISK (accepted for now): mcp_net is an ordinary bridge, not
+  # internal, because an internal network cannot publish 127.0.0.1:8090 for
+  # tailscale serve. So the mcp container is not cut off from the rest of the
+  # host: through the gateway it reaches the internet and every host port
+  # published on 0.0.0.0. With this file's defaults that is RethinkDB
+  # 28015/8080 (unauthenticated), Neo4j 7474/7687, backend 5000, discord-bot
+  # 8050, frontend 3000 and the public API. Postgres is out of reach only
+  # because it binds 127.0.0.1 by default. Recommended: set
+  # RETHINKDB_BIND_ADDR to 127.0.0.1 and bind Neo4j's ports to 127.0.0.1 (or
+  # drop them). A tailnet address would not help: the container can reach
+  # every host address. Or add a DOCKER-USER rule on the host that admits new
+  # connections from 172.31.250.10 only to the api's :8012.
+  mcp_net:
+    name: intellistock_mcp_net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+          ip_range: 172.31.250.128/25
+          gateway: 172.31.250.1
