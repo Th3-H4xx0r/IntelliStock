@@ -70,6 +70,7 @@ from stock_credential_boundary import StockCredentialError
 # Module level so it is monkeypatchable, and because it imports nothing heavier
 # than live_readiness -- the Docker import is inside the call.
 from deployed_artifact import deployed_artifact_digest
+from mcp_policy import mcp_policy
 from interactive_utils import (
     get_conn,
     InstanceExistsError,
@@ -1235,7 +1236,7 @@ def _code_fingerprint() -> "dict[str, str]":
     return out
 
 
-@app.get("/health", response_class=JSONResponse)
+@app.get("/health", response_class=JSONResponse, operation_id="health", openapi_extra=mcp_policy("read"))
 def api_health():
     """Liveness probe for load balancers / Dockploy / monitoring.
 
@@ -1273,7 +1274,7 @@ def api_health():
 # --- Help / commands list (public) ---
 
 
-@app.get("/help", response_class=JSONResponse)
+@app.get("/help", response_class=JSONResponse, operation_id="help", openapi_extra=mcp_policy("read"))
 def api_help():
     """List all available API commands (CLI-equivalent). Public."""
     return {
@@ -1355,7 +1356,7 @@ def api_help():
 # --- Auth endpoints (signup/login public; rest protected) ---
 
 
-@app.post("/auth/signup", response_class=JSONResponse)
+@app.post("/auth/signup", response_class=JSONResponse, operation_id="signup", openapi_extra=mcp_policy("never"))
 def api_signup(body: SignupBody, conn=Depends(conn_dependency)):
     """Register a new user. Requires SECRET_AUTH_KEY to match env."""
     if not verify_secret_auth_key(body.secret_auth_key):
@@ -1369,7 +1370,7 @@ def api_signup(body: SignupBody, conn=Depends(conn_dependency)):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/auth/login", response_class=JSONResponse)
+@app.post("/auth/login", response_class=JSONResponse, operation_id="login", openapi_extra=mcp_policy("never"))
 def api_login(body: LoginBody, request: Request = None, conn=Depends(conn_dependency)):
     """Login with username/password. Returns JWT access_token.
 
@@ -1420,7 +1421,7 @@ def api_login(body: LoginBody, request: Request = None, conn=Depends(conn_depend
     return {"access_token": token, "token_type": "bearer", "user": user_public}
 
 
-@app.get("/auth/me", response_class=JSONResponse)
+@app.get("/auth/me", response_class=JSONResponse, operation_id="me", openapi_extra=mcp_policy("never"))
 def api_me(current_user: dict = Depends(get_current_user), conn=Depends(conn_dependency)):
     """Return current authenticated user."""
     user = get_user_by_id(conn, current_user["id"])
@@ -1429,7 +1430,7 @@ def api_me(current_user: dict = Depends(get_current_user), conn=Depends(conn_dep
     return user_doc_to_public(user)
 
 
-@app.get("/auth/users", response_class=JSONResponse)
+@app.get("/auth/users", response_class=JSONResponse, operation_id="list_auth_users", openapi_extra=mcp_policy("never"))
 def api_list_auth_users(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
@@ -1439,7 +1440,8 @@ def api_list_auth_users(
     return {"users": users}
 
 
-@app.post("/auth/users", response_class=JSONResponse)
+@app.post("/auth/users", response_class=JSONResponse,
+          operation_id="create_auth_user", openapi_extra=mcp_policy("never"))
 def api_create_auth_user(
     body: CreateUserBody,
     conn=Depends(conn_dependency),
@@ -1478,7 +1480,8 @@ def api_create_auth_user(
     return user
 
 
-@app.get("/auth/users/{user_id}", response_class=JSONResponse)
+@app.get("/auth/users/{user_id}", response_class=JSONResponse,
+         operation_id="get_auth_user", openapi_extra=mcp_policy("never"))
 def api_get_auth_user(
     user_id: str,
     conn=Depends(conn_dependency),
@@ -1491,7 +1494,8 @@ def api_get_auth_user(
     return user_doc_to_public(user)
 
 
-@app.put("/auth/users/{user_id}", response_class=JSONResponse)
+@app.put("/auth/users/{user_id}", response_class=JSONResponse,
+         operation_id="update_auth_user", openapi_extra=mcp_policy("never"))
 def api_update_auth_user(
     user_id: str,
     body: UpdateUserBody,
@@ -1513,7 +1517,8 @@ def api_update_auth_user(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.delete("/auth/users/{user_id}", response_class=JSONResponse)
+@app.delete("/auth/users/{user_id}", response_class=JSONResponse,
+            operation_id="delete_auth_user", openapi_extra=mcp_policy("never"))
 def api_delete_auth_user(
     user_id: str,
     conn=Depends(conn_dependency),
@@ -1542,7 +1547,8 @@ def api_delete_auth_user(
 # --- Onboarding (per-user welcome flow flag) ---
 
 
-@app.get("/onboarding/state", response_class=JSONResponse)
+@app.get("/onboarding/state", response_class=JSONResponse,
+         operation_id="onboarding_state", openapi_extra=mcp_policy("read"))
 def api_onboarding_state(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
@@ -1581,7 +1587,8 @@ def api_onboarding_state(
     }
 
 
-@app.post("/onboarding/complete", response_class=JSONResponse)
+@app.post("/onboarding/complete", response_class=JSONResponse,
+          operation_id="onboarding_complete", openapi_extra=mcp_policy("write"))
 def api_onboarding_complete(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
@@ -1594,7 +1601,8 @@ def api_onboarding_complete(
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@app.post("/onboarding/reset", response_class=JSONResponse)
+@app.post("/onboarding/reset", response_class=JSONResponse,
+          operation_id="onboarding_reset", openapi_extra=mcp_policy("never"))
 def api_onboarding_reset(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
@@ -1656,7 +1664,8 @@ def _ensure_chatbot_ready(conn) -> None:
         )
 
 
-@app.get("/chatbot/conversations", response_class=JSONResponse)
+@app.get("/chatbot/conversations", response_class=JSONResponse,
+         operation_id="chatbot_list", openapi_extra=mcp_policy("read"))
 def api_chatbot_list(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
@@ -1667,7 +1676,8 @@ def api_chatbot_list(
     return {"conversations": conv_store.list_conversations(conn, current_user["id"])}
 
 
-@app.post("/chatbot/conversations", response_class=JSONResponse)
+@app.post("/chatbot/conversations", response_class=JSONResponse,
+          operation_id="chatbot_create", openapi_extra=mcp_policy("write"))
 def api_chatbot_create(
     body: ChatbotCreateBody,
     conn=Depends(conn_dependency),
@@ -1687,12 +1697,14 @@ def api_chatbot_create(
     return convo
 
 
-@app.get("/chatbot/conversations/{conv_id}", response_class=JSONResponse)
+@app.get("/chatbot/conversations/{conv_id}", response_class=JSONResponse,
+         operation_id="chatbot_get", openapi_extra=mcp_policy("read"))
 def api_chatbot_get(
     conv_id: str,
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
+    """Return one of your chatbot conversations with its messages."""
     from chatbot import conversations as conv_store
     convo = conv_store.get_conversation(conn, current_user["id"], conv_id)
     if not convo:
@@ -1700,13 +1712,15 @@ def api_chatbot_get(
     return convo
 
 
-@app.patch("/chatbot/conversations/{conv_id}", response_class=JSONResponse)
+@app.patch("/chatbot/conversations/{conv_id}", response_class=JSONResponse,
+           operation_id="chatbot_update", openapi_extra=mcp_policy("write"))
 def api_chatbot_update(
     conv_id: str,
     body: ChatbotUpdateBody,
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
+    """Rename a chatbot conversation or change its model or tool auto-confirm setting."""
     from chatbot import conversations as conv_store
     settings_update = None
     if body.auto_confirm_safe_tools is not None:
@@ -1726,24 +1740,28 @@ def api_chatbot_update(
     return convo
 
 
-@app.delete("/chatbot/conversations/{conv_id}", response_class=JSONResponse)
+@app.delete("/chatbot/conversations/{conv_id}", response_class=JSONResponse,
+            operation_id="chatbot_delete", openapi_extra=mcp_policy("irreversible"))
 def api_chatbot_delete(
     conv_id: str,
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
+    """Delete a chatbot conversation and all its messages. Irreversible: the history is gone."""
     from chatbot import conversations as conv_store
     if not conv_store.delete_conversation(conn, current_user["id"], conv_id):
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"deleted": True, "id": conv_id}
 
 
-@app.post("/chatbot/conversations/{conv_id}/clear", response_class=JSONResponse)
+@app.post("/chatbot/conversations/{conv_id}/clear", response_class=JSONResponse,
+          operation_id="chatbot_clear", openapi_extra=mcp_policy("irreversible"))
 def api_chatbot_clear(
     conv_id: str,
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
+    """Erase every message in a chatbot conversation but keep it. Irreversible: the history is gone."""
     from chatbot import conversations as conv_store
     convo = conv_store.clear_messages(conn, current_user["id"], conv_id)
     if not convo:
@@ -1751,7 +1769,8 @@ def api_chatbot_clear(
     return convo
 
 
-@app.post("/chatbot/conversations/{conv_id}/turn", response_class=JSONResponse)
+@app.post("/chatbot/conversations/{conv_id}/turn", response_class=JSONResponse,
+          operation_id="chatbot_turn", openapi_extra=mcp_policy("never"))
 def api_chatbot_turn(
     conv_id: str,
     body: ChatbotTurnBody,
@@ -1770,7 +1789,8 @@ def api_chatbot_turn(
     return {"messages": appended}
 
 
-@app.post("/chatbot/conversations/{conv_id}/confirm-tool", response_class=JSONResponse)
+@app.post("/chatbot/conversations/{conv_id}/confirm-tool", response_class=JSONResponse,
+          operation_id="chatbot_confirm_tool", openapi_extra=mcp_policy("never"))
 def api_chatbot_confirm_tool(
     conv_id: str,
     body: ChatbotConfirmBody,
@@ -1788,7 +1808,7 @@ def api_chatbot_confirm_tool(
     return {"messages": appended}
 
 
-@app.get("/chatbot/tools", response_class=JSONResponse)
+@app.get("/chatbot/tools", response_class=JSONResponse, operation_id="chatbot_tools", openapi_extra=mcp_policy("read"))
 def api_chatbot_tools(current_user: dict = Depends(get_current_user)):
     """Return the curated tool catalog for display in the chatbot settings."""
     from chatbot.tools import tool_catalog
@@ -1835,7 +1855,8 @@ def _resolve_mcp_session(request, conv_id: str):
     return sess
 
 
-@app.post("/chatbot/internal/mcp-tools-list", response_class=JSONResponse)
+@app.post("/chatbot/internal/mcp-tools-list", response_class=JSONResponse,
+          operation_id="mcp_tools_list", openapi_extra=mcp_policy("never"))
 def api_mcp_tools_list(
     body: _McpToolsListBody,
     request: Request,
@@ -1849,7 +1870,8 @@ def api_mcp_tools_list(
     return {"tools": openai_tool_definitions()}
 
 
-@app.post("/chatbot/internal/mcp-tool-call", response_class=JSONResponse)
+@app.post("/chatbot/internal/mcp-tool-call", response_class=JSONResponse,
+          operation_id="mcp_tool_call", openapi_extra=mcp_policy("never"))
 def api_mcp_tool_call(
     body: _McpToolCallBody,
     request: Request,
@@ -1876,7 +1898,8 @@ def api_mcp_tool_call(
     )
 
 
-@app.post("/chatbot/conversations/{conv_id}/mcp-confirm", response_class=JSONResponse)
+@app.post("/chatbot/conversations/{conv_id}/mcp-confirm", response_class=JSONResponse,
+          operation_id="mcp_confirm", openapi_extra=mcp_policy("never"))
 def api_mcp_confirm(
     conv_id: str,
     body: _McpConfirmBody,
@@ -1901,12 +1924,13 @@ def api_mcp_confirm(
 # --- Config & Tickers (all protected) ---
 
 
-@app.get("/status", response_class=JSONResponse)
+@app.get("/status", response_class=JSONResponse, operation_id="status", openapi_extra=mcp_policy("read"))
 def api_status(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the service on/off flags from Config and each engine's status."""
     return _run(action_status, conn)
 
 
-@app.post("/llm/test", response_class=JSONResponse)
+@app.post("/llm/test", response_class=JSONResponse, operation_id="test_llm_config", openapi_extra=mcp_policy("never"))
 def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     provider = str(body.provider or "").strip().lower()
     model = str(body.model or "").strip()
@@ -2085,7 +2109,8 @@ def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), 
     }
 
 
-@app.post("/benzinga/test", response_class=JSONResponse)
+@app.post("/benzinga/test", response_class=JSONResponse,
+          operation_id="test_benzinga_sources", openapi_extra=mcp_policy("never"))
 def api_test_benzinga_sources(body: BenzingaTestBody, current_user: dict = Depends(get_current_user)):
     """Test which Benzinga API sources are accessible with the given API key."""
     import requests as _req
@@ -2217,8 +2242,10 @@ class NotificationPrefsBody(BaseModel):
     categories: Dict[str, CategoryRoute]
 
 
-@app.get("/notification-preferences", response_class=JSONResponse)
+@app.get("/notification-preferences", response_class=JSONResponse,
+         operation_id="get_notification_prefs", openapi_extra=mcp_policy("read"))
 def api_get_notification_prefs(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return your notification routing per category, plus the category list to display."""
     res = _run(action_get_notification_preferences, conn, current_user["id"])
     # Include the ordered taxonomy metadata so the clients render grouped
     # sections (headers + labels) without hardcoding the type list.
@@ -2230,8 +2257,10 @@ def api_get_notification_prefs(conn=Depends(conn_dependency), current_user: dict
     return res
 
 
-@app.put("/notification-preferences", response_class=JSONResponse)
+@app.put("/notification-preferences", response_class=JSONResponse,
+         operation_id="put_notification_prefs", openapi_extra=mcp_policy("irreversible"))
 def api_put_notification_prefs(body: NotificationPrefsBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Overwrite your notification routing for the given categories. Can silence trade alerts."""
     # _validate_notification_categories raises ValueError on an unknown
     # category, which _run maps to HTTP 400.
     cats = {k: v.dict() for k, v in body.categories.items()}
@@ -2248,7 +2277,8 @@ class PushDeviceBody(BaseModel):
     app_version: Optional[str] = None
 
 
-@app.get("/push/devices", response_class=JSONResponse)
+@app.get("/push/devices", response_class=JSONResponse,
+         operation_id="list_push_devices", openapi_extra=mcp_policy("never"))
 def api_list_push_devices(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     devices = _run(action_list_push_devices, conn, current_user["id"])
     out = [
@@ -2265,7 +2295,8 @@ def api_list_push_devices(conn=Depends(conn_dependency), current_user: dict = De
     return {"devices": out}
 
 
-@app.post("/push/devices", response_class=JSONResponse)
+@app.post("/push/devices", response_class=JSONResponse,
+          operation_id="register_push_device", openapi_extra=mcp_policy("never"))
 def api_register_push_device(body: PushDeviceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     return _run(
         action_register_push_device, conn, current_user["id"],
@@ -2273,7 +2304,8 @@ def api_register_push_device(body: PushDeviceBody, conn=Depends(conn_dependency)
     )
 
 
-@app.delete("/push/devices/{token}", response_class=JSONResponse)
+@app.delete("/push/devices/{token}", response_class=JSONResponse,
+            operation_id="delete_push_device", openapi_extra=mcp_policy("never"))
 def api_delete_push_device(token: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     # Scope the delete to the caller so one user can't unregister another's token.
     return _run(action_delete_push_device, conn, token, current_user["id"])
@@ -2286,7 +2318,8 @@ class TestNotificationBody(BaseModel):
     channel: str  # "discord" | "push"
 
 
-@app.post("/notifications/test", response_class=JSONResponse)
+@app.post("/notifications/test", response_class=JSONResponse,
+          operation_id="test_notification", openapi_extra=mcp_policy("never"))
 def api_test_notification(body: TestNotificationBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Send a sample notification through one sink directly (bypasses category
     preferences) so the operator can confirm a delivery option works."""
@@ -2320,28 +2353,34 @@ from api import app_updates  # noqa: E402
 app.include_router(app_updates.build_router(get_current_user))
 
 
-@app.get("/tickers", response_class=JSONResponse)
+@app.get("/tickers", response_class=JSONResponse, operation_id="tickers", openapi_extra=mcp_policy("read"))
 def api_tickers(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the symbols the price service tracks."""
     return _run(action_tickers, conn)
 
 
-@app.post("/tickers", response_class=JSONResponse)
+@app.post("/tickers", response_class=JSONResponse, operation_id="add_ticker", openapi_extra=mcp_policy("write"))
 def api_add_ticker(body: AddTickerBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Add symbols to the price service's tracked list (restarts the price broker)."""
     return _run(action_add_ticker, conn, body.symbols)
 
 
-@app.delete("/tickers/{symbol}", response_class=JSONResponse)
+@app.delete("/tickers/{symbol}", response_class=JSONResponse,
+            operation_id="remove_ticker", openapi_extra=mcp_policy("irreversible"))
 def api_remove_ticker(symbol: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Stop tracking a symbol in the price service. Restarts the price broker; its price stops updating."""
     return _run(action_remove_ticker, conn, symbol)
 
 
-@app.get("/prices", response_class=JSONResponse)
+@app.get("/prices", response_class=JSONResponse, operation_id="prices", openapi_extra=mcp_policy("read"))
 def api_prices(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the latest price of every symbol the price service tracks."""
     return _run(action_prices, conn)
 
 
-@app.get("/history", response_class=JSONResponse)
+@app.get("/history", response_class=JSONResponse, operation_id="history", openapi_extra=mcp_policy("read"))
 def api_history(ticker: Optional[str] = None, limit: int = 30, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return recent price history, newest first, for one ticker or all (limit capped at 500)."""
     return _run(action_history, conn, ticker, limit)
 
 
@@ -2927,7 +2966,8 @@ class OllamaListModelsBody(BaseModel):
 import ollama_client  # noqa: E402
 
 
-@app.post("/ollama/list-models", response_class=JSONResponse)
+@app.post("/ollama/list-models", response_class=JSONResponse,
+          operation_id="ollama_list_models", openapi_extra=mcp_policy("never"))
 async def api_ollama_list_models(
     body: OllamaListModelsBody,
     current_user: dict = Depends(get_current_user),
@@ -2978,7 +3018,8 @@ class BedrockListModelsBody(BaseModel):
 import bedrock_client  # noqa: E402
 
 
-@app.post("/bedrock/list-models", response_class=JSONResponse)
+@app.post("/bedrock/list-models", response_class=JSONResponse,
+          operation_id="bedrock_list_models", openapi_extra=mcp_policy("never"))
 def api_bedrock_list_models(
     body: BedrockListModelsBody,
     current_user: dict = Depends(get_current_user),
@@ -3028,7 +3069,8 @@ class OpenRouterListModelsBody(BaseModel):
 import openrouter_client  # noqa: E402
 
 
-@app.post("/openrouter/list-models", response_class=JSONResponse)
+@app.post("/openrouter/list-models", response_class=JSONResponse,
+          operation_id="openrouter_list_models", openapi_extra=mcp_policy("never"))
 def api_openrouter_list_models(
     body: OpenRouterListModelsBody,
     current_user: dict = Depends(get_current_user),
@@ -3126,7 +3168,7 @@ class CodexInstallBody(BaseModel):
     method: Optional[str] = Field(default=None, max_length=16)
 
 
-@app.get("/codex/status", response_class=JSONResponse)
+@app.get("/codex/status", response_class=JSONResponse, operation_id="codex_status", openapi_extra=mcp_policy("never"))
 def api_codex_status(current_user: dict = Depends(get_current_user)):
     """Report whether the codex CLI is installed, its version, whether the
     host is authenticated against OpenAI, and which install method (npm/
@@ -3168,7 +3210,8 @@ def api_codex_status(current_user: dict = Depends(get_current_user)):
     }
 
 
-@app.post("/codex/install", response_class=JSONResponse)
+@app.post("/codex/install", response_class=JSONResponse,
+          operation_id="codex_install_start", openapi_extra=mcp_policy("never"))
 def api_codex_install_start(
     body: CodexInstallBody,
     current_user: dict = Depends(get_current_user),
@@ -3194,7 +3237,8 @@ def api_codex_install_start(
     return {"job_id": job.job_id, "state": job.state}
 
 
-@app.get("/codex/install/{job_id}", response_class=JSONResponse)
+@app.get("/codex/install/{job_id}", response_class=JSONResponse,
+         operation_id="codex_install_status", openapi_extra=mcp_policy("never"))
 def api_codex_install_status(
     job_id: str,
     current_user: dict = Depends(get_current_user),
@@ -3218,7 +3262,8 @@ class CodexLoginStartBody(BaseModel):
     cli_path: Optional[str] = Field(default=None, max_length=256)
 
 
-@app.post("/codex/login/start", response_class=JSONResponse)
+@app.post("/codex/login/start", response_class=JSONResponse,
+          operation_id="codex_login_start", openapi_extra=mcp_policy("never"))
 def api_codex_login_start(
     body: CodexLoginStartBody,
     current_user: dict = Depends(get_current_user),
@@ -3259,7 +3304,8 @@ def api_codex_login_start(
     }
 
 
-@app.get("/codex/login/{job_id}/status", response_class=JSONResponse)
+@app.get("/codex/login/{job_id}/status", response_class=JSONResponse,
+         operation_id="codex_login_status", openapi_extra=mcp_policy("never"))
 def api_codex_login_status(
     job_id: str,
     current_user: dict = Depends(get_current_user),
@@ -3277,7 +3323,8 @@ def api_codex_login_status(
     return snap
 
 
-@app.post("/codex/login/{job_id}/cancel", response_class=JSONResponse)
+@app.post("/codex/login/{job_id}/cancel", response_class=JSONResponse,
+          operation_id="codex_login_cancel", openapi_extra=mcp_policy("never"))
 def api_codex_login_cancel(
     job_id: str,
     current_user: dict = Depends(get_current_user),
@@ -3294,7 +3341,7 @@ def api_codex_login_cancel(
     return {"ok": True}
 
 
-@app.post("/codex/logout", response_class=JSONResponse)
+@app.post("/codex/logout", response_class=JSONResponse, operation_id="codex_logout", openapi_extra=mcp_policy("never"))
 def api_codex_logout(current_user: dict = Depends(get_current_user)):
     """Run ``codex logout`` to drop the stored OpenAI credentials.
     Open to any authenticated user — affects the shared deployment-wide
@@ -3342,7 +3389,8 @@ class ClaudeLoginSubmitBody(BaseModel):
     code: str = Field(min_length=6, max_length=1024)
 
 
-@app.get("/claude/auth/status", response_class=JSONResponse)
+@app.get("/claude/auth/status", response_class=JSONResponse,
+         operation_id="claude_auth_status", openapi_extra=mcp_policy("never"))
 def api_claude_auth_status(
     cli_path: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
@@ -3361,7 +3409,8 @@ def api_claude_auth_status(
     return claude_auth_status((cli_path or "claude").strip() or "claude")
 
 
-@app.post("/claude/login/start", response_class=JSONResponse)
+@app.post("/claude/login/start", response_class=JSONResponse,
+          operation_id="claude_login_start", openapi_extra=mcp_policy("never"))
 async def api_claude_login_start(
     body: ClaudeLoginStartBody,
     current_user: dict = Depends(get_current_user),
@@ -3393,7 +3442,8 @@ async def api_claude_login_start(
     }
 
 
-@app.post("/claude/login/{job_id}/submit", response_class=JSONResponse)
+@app.post("/claude/login/{job_id}/submit", response_class=JSONResponse,
+          operation_id="claude_login_submit", openapi_extra=mcp_policy("never"))
 async def api_claude_login_submit(
     job_id: str,
     body: ClaudeLoginSubmitBody,
@@ -3414,7 +3464,8 @@ async def api_claude_login_submit(
     return snap
 
 
-@app.get("/claude/login/{job_id}/status", response_class=JSONResponse)
+@app.get("/claude/login/{job_id}/status", response_class=JSONResponse,
+         operation_id="claude_login_status", openapi_extra=mcp_policy("never"))
 def api_claude_login_status(
     job_id: str,
     current_user: dict = Depends(get_current_user),
@@ -3431,7 +3482,8 @@ def api_claude_login_status(
     return snap
 
 
-@app.post("/claude/login/{job_id}/cancel", response_class=JSONResponse)
+@app.post("/claude/login/{job_id}/cancel", response_class=JSONResponse,
+          operation_id="claude_login_cancel", openapi_extra=mcp_policy("never"))
 def api_claude_login_cancel(
     job_id: str,
     current_user: dict = Depends(get_current_user),
@@ -3448,7 +3500,7 @@ def api_claude_login_cancel(
     return {"ok": True}
 
 
-@app.get("/claude/models", response_class=JSONResponse)
+@app.get("/claude/models", response_class=JSONResponse, operation_id="claude_models", openapi_extra=mcp_policy("never"))
 def api_claude_models(
     cli_path: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
@@ -3464,7 +3516,8 @@ def api_claude_models(
     return list_available_models((cli_path or "claude").strip() or "claude")
 
 
-@app.post("/claude/logout", response_class=JSONResponse)
+@app.post("/claude/logout", response_class=JSONResponse,
+          operation_id="claude_logout", openapi_extra=mcp_policy("never"))
 async def api_claude_logout(current_user: dict = Depends(get_current_user)):
     """Run ``claude auth logout`` to drop the deployment's Claude
     subscription credentials. Affects shared deployment-wide auth."""
@@ -3572,7 +3625,8 @@ class MigrateCredentialsBody(BaseModel):
     scrub_strategies: bool = False
 
 
-@app.post("/admin/credentials/migrate", response_class=JSONResponse)
+@app.post("/admin/credentials/migrate", response_class=JSONResponse,
+          operation_id="migrate_credentials", openapi_extra=mcp_policy("never"))
 def api_migrate_credentials(
     body: MigrateCredentialsBody,
     conn=Depends(conn_dependency),
@@ -6400,7 +6454,7 @@ _IMG_PROXY_HOSTS = ("flagcdn.com", "a.espncdn.com", "a1.espncdn.com", "a2.espncd
 _IMG_PROXY_MAX_BYTES = 5 * 1024 * 1024  # 5 MB cap — these are tiny crests/flags
 
 
-@app.get("/kalshi/img")
+@app.get("/kalshi/img", operation_id="kalshi_img_proxy", openapi_extra=mcp_policy("never"))
 def api_kalshi_img_proxy(u: str):
     """Server-side image proxy for team crests/flags so the CLIENT never hits an
     external host directly — everything routes through IntelliStock (works abroad,
@@ -7171,7 +7225,8 @@ class LLMOutputBody(BaseModel):
 _LLM_OUTPUT_MAX_CHARS = int(os.environ.get("LLM_OUTPUT_MAX_CHARS", "200000") or 200000)
 
 
-@app.post("/llm/outputs", response_class=JSONResponse)
+@app.post("/llm/outputs", response_class=JSONResponse,
+          operation_id="llm_output_save", openapi_extra=mcp_policy("never"))
 def api_llm_output_save(body: LLMOutputBody, request: Request):
     """Save a raw LLM output log. Loopback-only: llm_utils posts to it from
     inside the container. It had no auth and no size cap, so anything that
@@ -7200,7 +7255,8 @@ def api_llm_output_save(body: LLMOutputBody, request: Request):
     return {"id": output_id}
 
 
-@app.get("/llm/outputs/{output_id}", response_class=JSONResponse)
+@app.get("/llm/outputs/{output_id}", response_class=JSONResponse,
+         operation_id="llm_output_get", openapi_extra=mcp_policy("read"))
 def api_llm_output_get(output_id: str, current_user: dict = Depends(get_current_user)):
     """Retrieve a raw LLM output log by ID. Authenticated: these files hold raw
     model output, which can contain prompt content."""
@@ -7237,16 +7293,19 @@ def api_llm_output_get(output_id: str, current_user: dict = Depends(get_current_
 # -- LLM Usage telemetry endpoints --------------------------------------------
 
 
-@app.get("/llm-usage/summary", response_class=JSONResponse)
+@app.get("/llm-usage/summary", response_class=JSONResponse,
+         operation_id="llm_usage_summary", openapi_extra=mcp_policy("read"))
 def api_llm_usage_summary(
     range: str = "24h",
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
+    """Return LLM calls, tokens and cost over a range, totalled and per provider and model."""
     return _llm_usage_summary(range_str=range, conn=conn)
 
 
-@app.get("/llm-usage/timeseries", response_class=JSONResponse)
+@app.get("/llm-usage/timeseries", response_class=JSONResponse,
+         operation_id="llm_usage_timeseries", openapi_extra=mcp_policy("read"))
 def api_llm_usage_timeseries(
     range: str = "24h",
     bucket: str = "hour",
@@ -7254,12 +7313,14 @@ def api_llm_usage_timeseries(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
+    """Return LLM usage and cost over a range in time buckets, optionally for one provider."""
     return _llm_usage_timeseries(
         range_str=range, bucket=bucket, provider=provider or None, conn=conn,
     )
 
 
-@app.get("/llm-usage/top-spenders", response_class=JSONResponse)
+@app.get("/llm-usage/top-spenders", response_class=JSONResponse,
+         operation_id="llm_usage_top_spenders", openapi_extra=mcp_policy("read"))
 def api_llm_usage_top_spenders(
     range: str = "24h",
     group_by: str = "model",
@@ -7267,12 +7328,14 @@ def api_llm_usage_top_spenders(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
+    """Return the top LLM spenders over a range, grouped by model, strategy, call site or provider."""
     return _llm_usage_top_spenders(
         range_str=range, group_by=group_by, limit=limit, conn=conn,
     )
 
 
-@app.get("/llm-usage/by-backtest", response_class=JSONResponse)
+@app.get("/llm-usage/by-backtest", response_class=JSONResponse,
+         operation_id="llm_usage_by_backtest", openapi_extra=mcp_policy("read"))
 def api_llm_usage_by_backtest(
     range: str = "30d",
     limit: int = 100,
@@ -7303,7 +7366,8 @@ def api_backtest_llm_cost(
     return _llm_usage_for_backtest(backtest_id=str(backtest_id), conn=conn)
 
 
-@app.get("/llm-usage/calls", response_class=JSONResponse)
+@app.get("/llm-usage/calls", response_class=JSONResponse,
+         operation_id="llm_usage_calls", openapi_extra=mcp_policy("read"))
 def api_llm_usage_calls(
     limit: int = 50,
     offset: int = 0,
@@ -7315,6 +7379,7 @@ def api_llm_usage_calls(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
+    """Return recent LLM calls, filterable by range, provider, model, backtest and strategy."""
     import llm_telemetry
     if (
         range == "now"
@@ -7355,8 +7420,10 @@ def api_llm_usage_calls(
     )
 
 
-@app.get("/llm-usage/health", response_class=JSONResponse)
+@app.get("/llm-usage/health", response_class=JSONResponse,
+         operation_id="llm_usage_health", openapi_extra=mcp_policy("read"))
 def api_llm_usage_health(current_user: dict = Depends(get_current_user)):
+    """Return LLM telemetry health: buffer depth, last flush time and write errors in 24h."""
     import llm_telemetry
     return {
         "buffer_depth": llm_telemetry.get_buffer_depth(),

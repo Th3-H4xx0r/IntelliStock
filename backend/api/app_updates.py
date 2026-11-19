@@ -41,6 +41,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 
+from mcp_policy import mcp_policy
+
 logger = logging.getLogger(__name__)
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -402,18 +404,21 @@ def build_router(current_user_dependency: Callable) -> APIRouter:
     router = APIRouter()
     authed = Depends(current_user_dependency)
 
-    @router.get("/app-updates/latest")
+    @router.get("/app-updates/latest", operation_id="app_updates_latest", openapi_extra=mcp_policy("read"))
     def api_app_updates_latest(request: Request, platform: str = "ios", build: str = "0",
                                current_user: dict = authed):
+        """Return the newest published app build and an install link when it beats the caller's build."""
         if platform not in PLATFORMS:
             raise HTTPException(status_code=400, detail="platform must be ios")
         return latest(platform, parse_build(build), public_base(request))
 
-    @router.get("/app-updates/install-status")
+    @router.get("/app-updates/install-status",
+                operation_id="app_updates_install_status", openapi_extra=mcp_policy("read"))
     def api_app_updates_install_status(token: str = "", current_user: dict = authed):
+        """Report whether iOS has started downloading the build behind an install token."""
         return {"started": install_started(token)}
 
-    @router.post("/app-updates/upload")
+    @router.post("/app-updates/upload", operation_id="app_updates_upload", openapi_extra=mcp_policy("never"))
     async def api_app_updates_upload(request: Request, background_tasks: BackgroundTasks,
                                      platform: str = "ios", build: str = "", commit: str = "",
                                      notes: str = "", current_user: dict = authed):
@@ -453,7 +458,7 @@ def build_router(current_user_dependency: Callable) -> APIRouter:
                     (current_user or {}).get("username"))
         return {"ok": True, "build": rec}
 
-    @router.post("/app-updates/rollback")
+    @router.post("/app-updates/rollback", operation_id="app_updates_rollback", openapi_extra=mcp_policy("never"))
     def api_app_updates_rollback(platform: str = "ios", current_user: dict = authed):
         if platform not in PLATFORMS:
             raise HTTPException(status_code=400, detail="platform must be ios")
@@ -465,7 +470,7 @@ def build_router(current_user_dependency: Callable) -> APIRouter:
     # Public install links: no session (iOS's installer has none to send). Every
     # one is gated by its signed, expiring token; anything else is a bare 403.
 
-    @router.get("/ota/m/{token}.plist")
+    @router.get("/ota/m/{token}.plist", operation_id="ota_manifest", openapi_extra=mcp_policy("never"))
     def ota_manifest(token: str, request: Request):
         rec = check_token(token)
         base = public_base(request)
@@ -474,7 +479,7 @@ def build_router(current_user_dependency: Callable) -> APIRouter:
         return Response(manifest_plist(rec, base, token), media_type="application/xml",
                         headers={"Cache-Control": "no-store"})
 
-    @router.get("/ota/d/{token}/{name}")
+    @router.get("/ota/d/{token}/{name}", operation_id="ota_download", openapi_extra=mcp_policy("never"))
     def ota_download(token: str, name: str):
         rec = check_token(token)
         if not rec or name != PLATFORMS[rec["platform"]][0]:

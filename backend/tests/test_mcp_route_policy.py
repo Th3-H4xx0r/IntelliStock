@@ -1,0 +1,100 @@
+"""Every route carries an x-mcp policy and an operation_id (contract §1).
+
+The policy on each decorator is the only list of what an MCP caller may do: the
+gate reads `openapi_extra["x-mcp"]` back through `validate_policy`, and the MCP
+server builds its tools from the operation_ids. These tests hold the annotations
+to the rules the gate relies on. They cover the route prefixes annotated so far
+(ANNOTATED_PREFIXES); a later batch widens the tuple, and the last one replaces
+the filter with every route.
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+from fastapi.routing import APIRoute
+
+_BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+
+from mcp_policy import NAME_RE, validate_policy  # noqa: E402
+
+# The spec's direct tools: an x-mcp "tool" must name one of these.
+EXPECTED_DIRECT_TOOLS = frozenset({
+    "list_instances", "get_instance", "get_live_state", "get_instance_portfolio_history",
+    "get_account_summary", "get_positions", "get_orders", "list_backtests",
+    "get_backtest_status", "get_backtest_summary", "create_backtest", "stop_backtest",
+    "list_strategies", "get_strategy", "get_symbol_info", "get_symbol_historicals",
+    "get_market_news", "list_swing_signals", "start_instance", "stop_instance", "live_command",
+})
+
+
+def _api_routes() -> list[APIRoute]:
+    from api import main
+
+    return [r for r in main.app.routes if isinstance(r, APIRoute)]
+
+
+def _policy(route) -> dict | None:
+    return validate_policy((getattr(route, "openapi_extra", None) or {}).get("x-mcp"))
+
+
+ANNOTATED_PREFIXES = ("/health", "/help", "/auth/", "/onboarding/", "/chatbot/", "/status", "/llm/",
+    "/llm-usage/", "/benzinga/", "/notification-preferences", "/push/", "/notifications/", "/tickers",
+    "/prices", "/history", "/app-updates/", "/ota/", "/codex/", "/claude/", "/admin/", "/ollama/",
+    "/bedrock/", "/openrouter/", "/kalshi/img")
+PENDING = ()          # path prefixes inside an annotated prefix that a later batch owns
+
+
+def _annotated():
+    return [r for r in _api_routes() if r.path.startswith(ANNOTATED_PREFIXES) and not r.path.startswith(PENDING or ("\0",))]
+
+
+def test_annotated_routes_have_valid_x_mcp():
+    bad = [f"{sorted(r.methods)} {r.path}" for r in _annotated() if _policy(r) is None]
+    assert not bad, f"missing/invalid x-mcp (add openapi_extra=mcp_policy(...)): {bad}"
+
+
+def test_operation_ids_are_unique_snake_case_and_short():
+    ids = [r.operation_id for r in _annotated()]
+    assert all(i and NAME_RE.match(i) for i in ids) and len(ids) == len(set(ids))
+
+
+def test_tools_are_unique_and_known():
+    tools = [p["tool"] for p in map(_policy, _annotated()) if p and "tool" in p]
+    assert len(tools) == len(set(tools)) and set(tools) <= EXPECTED_DIRECT_TOOLS
+
+
+def test_exposed_routes_have_a_description():
+    bare = [r.path for r in _annotated() if _policy(r)["class"] != "never" and not (r.description or "").strip()]
+    assert not bare
+
+
+def test_every_delete_is_irreversible_or_never():
+    assert all(_policy(r)["class"] in ("irreversible", "never") for r in _annotated() if "DELETE" in r.methods)
+
+
+def test_get_routes_are_read_or_never():
+    assert all(_policy(r)["class"] in ("read", "never") for r in _annotated() if r.methods == {"GET"})
+
+
+NEVER_PREFIXES = ("/auth/", "/codex/", "/claude/", "/admin/", "/ota/", "/chatbot/internal/", "/push/",
+                  "/app-updates/upload", "/app-updates/rollback", "/llm/test", "/llm/outputs", "/kalshi/img",
+                  "/ollama/", "/bedrock/", "/openrouter/", "/notifications/test", "/benzinga/test")
+
+
+def test_sensitive_routes_are_never():
+    assert all(_policy(r)["class"] == "never" for r in _annotated()
+               if r.path.startswith(NEVER_PREFIXES) and not (r.path == "/llm/outputs/{output_id}" and r.methods == {"GET"}))
+
+
+def test_money_targets_resolve():
+    for r in _annotated():
+        p = _policy(r)
+        if p["class"] != "money":
+            continue
+        (field,) = p["target"].values()
+        body_model = getattr(getattr(r, "body_field", None), "type_", None)
+        body_fields = set(getattr(body_model, "model_fields", {}) or {})
+        assert field in {x.name for x in r.dependant.path_params} | body_fields, r.path
