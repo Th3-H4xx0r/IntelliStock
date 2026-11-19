@@ -51,6 +51,13 @@ nonisolated struct SwingSignal: Hashable, Sendable, Identifiable {
     let claimedAt: Date?
     /// The lane's scan context (stock_price, otm_pct, ...).
     let context: JSONObject
+    /// The latest regrade of a wheel card; nil when it was never regraded
+    /// or the block is not an object. A `let`, like every field: a row is
+    /// one server snapshot, so the count an approval sends always belongs to
+    /// the terms on screen.
+    let regrade: SwingRegrade?
+    /// "manual_scan" for a card a manual wheel run made; "" otherwise.
+    let source: String
 
     init(json j: JSON) {
         id = swingStr(j["id"])
@@ -69,7 +76,15 @@ nonisolated struct SwingSignal: Hashable, Sendable, Identifiable {
         orderClientId = swingStr(j["order_client_id"]).isEmpty ? nil : swingStr(j["order_client_id"])
         claimedAt = DartDateTime.tryParse(swingStr(j["claimed_at"]))
         context = j["context"].orderedObjectValue
+        regrade = j["regrade"].isObject ? SwingRegrade(json: j["regrade"]) : nil
+        source = swingStr(j["source"])
     }
+
+    /// Made by a manual "Run wheel now", not the weekly scan.
+    var isManualRun: Bool { source == "manual_scan" }
+
+    /// Only a pending wheel card can be regraded.
+    var canRegrade: Bool { isWheel && status == "pending" }
 
     /// Pending again after a broker claim: an approval the broker refused.
     var returnedByBroker: Bool { status == "pending" && claimedAt != nil }
@@ -116,6 +131,129 @@ nonisolated struct SwingSignal: Hashable, Sendable, Identifiable {
     var collateral: Double? {
         guard let s = strike, let q = qty else { return nil }
         return s * 100 * Double(q)
+    }
+}
+
+/// What a wheel card said before its latest regrade (`regrade.previous`).
+nonisolated struct SwingRegradePrevious: Hashable, Sendable {
+    let score: Int?
+    let recommendation: String
+    let stockPrice: Double?
+    let strike: Double?
+    let premiumEst: Double?
+    let expiry: String
+    /// When that score was made.
+    let at: Date?
+
+    init(json j: JSON) {
+        score = swingInt(j["score"])
+        recommendation = swingStr(j["recommendation"])
+        stockPrice = swingNum(j["stock_price"])
+        strike = swingNum(j["strike"])
+        premiumEst = swingNum(j["premium_est"])
+        expiry = swingStr(j["expiry"])
+        at = DartDateTime.tryParse(swingStr(j["at"]))
+    }
+}
+
+/// A wheel card's `regrade` block (swing_trader/wheel_manual.py). Every
+/// field is optional on the wire; a missing or mistyped one reads empty.
+nonisolated struct SwingRegrade: Hashable, Sendable {
+    /// queued | running | done | failed; "" when missing.
+    let status: String
+    let requestedAt: Date?
+    let requestedBy: String
+    let finishedAt: Date?
+    /// Regrades completed.
+    let count: Int
+    let error: String
+    /// Set by a finished regrade only.
+    let qualifies: Bool?
+    /// false: the name failed today's screen, so the score, strike and
+    /// reasoning were left as they were.
+    let rescored: Bool?
+    /// Why it no longer qualifies.
+    let reason: String
+    /// When the card's current score was made.
+    let scoredAt: Date?
+    let previous: SwingRegradePrevious?
+
+    init(json j: JSON) {
+        status = swingStr(j["status"])
+        requestedAt = DartDateTime.tryParse(swingStr(j["requested_at"]))
+        requestedBy = swingStr(j["requested_by"])
+        finishedAt = DartDateTime.tryParse(swingStr(j["finished_at"]))
+        count = swingInt(j["count"]) ?? 0
+        error = swingStr(j["error"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        qualifies = j["qualifies"].boolValue
+        rescored = j["rescored"].boolValue
+        reason = swingStr(j["reason"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        scoredAt = DartDateTime.tryParse(swingStr(j["scored_at"]))
+        previous = j["previous"].isObject ? SwingRegradePrevious(json: j["previous"]) : nil
+    }
+}
+
+/// One manual wheel run (`GET/POST /instances/{id}/wheel/scan`'s `run`).
+nonisolated struct WheelRun: Hashable, Sendable {
+    let id: String
+    /// running | done | failed.
+    let status: String
+    /// queued | screening | earnings | scoring | done | failed.
+    let phase: String
+    let requestedBy: String
+    let startedAt: Date?
+    let finishedAt: Date?
+    /// The NY session it scanned, YYYY-MM-DD; "" until the run sets it.
+    let session: String
+    let scanned: Int
+    let passedScreen: Int
+    let toScore: Int
+    let scored: Int
+    let newPending: Int
+    let rejected: Int
+    let skippedExisting: Int
+    let errors: Int
+    let error: String
+
+    init(json j: JSON) {
+        func count(_ key: String) -> Int { swingInt(j[key]) ?? 0 }
+        id = swingStr(j["id"])
+        status = swingStr(j["status"])
+        phase = swingStr(j["phase"])
+        requestedBy = swingStr(j["requested_by"])
+        startedAt = DartDateTime.tryParse(swingStr(j["started_at"]))
+        finishedAt = DartDateTime.tryParse(swingStr(j["finished_at"]))
+        session = swingStr(j["session"])
+        scanned = count("scanned")
+        passedScreen = count("passed_screen")
+        toScore = count("to_score")
+        scored = count("scored")
+        newPending = count("new_pending")
+        rejected = count("rejected")
+        skippedExisting = count("skipped_existing")
+        errors = count("errors")
+        error = swingStr(j["error"]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// `GET /instances/{id}/wheel/scan` (and the 200 of its POST): the newest
+/// manual run and whether the server counts it as still going.
+nonisolated struct WheelRunStatus: Hashable, Sendable {
+    let run: WheelRun?
+    let inProgress: Bool
+
+    init(run: WheelRun? = nil, inProgress: Bool = false) {
+        self.run = run
+        self.inProgress = inProgress
+    }
+
+    /// Trusts the server's `in_progress` (it already counts a run whose
+    /// heartbeat stopped as finished). A missing or junk run reads as none.
+    init(json j: JSON) {
+        self.init(
+            run: j["run"].isObject ? WheelRun(json: j["run"]) : nil,
+            inProgress: j["in_progress"].bool
+        )
     }
 }
 
@@ -341,13 +479,20 @@ nonisolated struct SwingRepository: Sendable {
         DecisionReceipt(json: try await client.post("/instances/\(instanceId)/swing/signals/\(signalId)/resend"))
     }
 
-    /// POST .../decision with {decision, reason?}. `decision` is "approve" |
-    /// "approve_half" | "reject". Throws `ApiError` on non-2xx.
-    func decide(_ instanceId: String, _ signalId: String, _ decision: String, reason: String? = nil) async throws -> DecisionReceipt {
+    /// POST .../decision with {decision, reason?, expect_regrade_count?}.
+    /// `decision` is "approve" | "approve_half" | "reject".
+    /// `expectRegradeCount` (a wheel approval) is the regrade count of the
+    /// card the operator saw; the server answers 412 when the card has been
+    /// regraded since. Throws `ApiError` on non-2xx.
+    func decide(
+        _ instanceId: String, _ signalId: String, _ decision: String,
+        reason: String? = nil, expectRegradeCount: Int? = nil
+    ) async throws -> DecisionReceipt {
         var body: JSONObject = ["decision": .string(decision)]
         if let r = reason?.trimmingCharacters(in: .whitespacesAndNewlines), !r.isEmpty {
             body["reason"] = .string(r)
         }
+        if let expectRegradeCount { body["expect_regrade_count"] = .int(expectRegradeCount) }
         let data = try await client.post(
             "/instances/\(instanceId)/swing/signals/\(signalId)/decision",
             body: .object(body)
@@ -370,5 +515,27 @@ nonisolated struct SwingRepository: Sendable {
     func wheel(_ instanceId: String) async throws -> WheelSnapshot {
         let data = try await client.get("/instances/\(instanceId)/wheel")
         return data.isObject ? WheelSnapshot(json: data, fetchedAt: Date()) : .empty
+    }
+
+    /// POST .../regrade: re-score one pending wheel card at today's prices.
+    /// Answers the signal with its regrade queued; the result lands on the
+    /// row about a minute later. Throws `ApiError` on non-2xx (400 not a
+    /// pending wheel signal, 404 unknown, 409 already under way, 503 the
+    /// instance is not running or it could not be queued).
+    func regradeSignal(_ instanceId: String, _ signalId: String) async throws -> SwingSignal {
+        let data = try await client.post("/instances/\(instanceId)/swing/signals/\(signalId)/regrade")
+        return SwingSignal(json: data["signal"])
+    }
+
+    /// POST .../wheel/scan: run the wheel scan now. It only adds review
+    /// cards and never places an order. Throws `ApiError` on non-2xx (409 a
+    /// run is under way, 503 not running or not queued).
+    func startWheelRun(_ instanceId: String) async throws -> WheelRunStatus {
+        WheelRunStatus(json: try await client.post("/instances/\(instanceId)/wheel/scan"))
+    }
+
+    /// GET .../wheel/scan: the newest manual run, or none.
+    func wheelRunStatus(_ instanceId: String) async throws -> WheelRunStatus {
+        WheelRunStatus(json: try await client.get("/instances/\(instanceId)/wheel/scan"))
     }
 }

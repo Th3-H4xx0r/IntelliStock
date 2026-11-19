@@ -104,7 +104,20 @@ nonisolated enum DecisionOutcome: Hashable, Sendable {
     case failed
     /// A second tap while the first request was in flight. Nothing was sent.
     case ignored
+    /// 412: the wheel card was regraded since the operator saw it. Nothing
+    /// was sent; the card stays and the list has been re-read, so the review
+    /// can show the new terms and a second approval names the new count.
+    case regraded
 }
+
+/// What a 412 says when the server sent no detail.
+nonisolated let kRegradedSinceOpened = "This card was regraded since you opened it; review the new terms and approve again."
+
+/// A 412 whose re-read did not bring the card's new terms (the read failed,
+/// or the card is gone). Approving again sends the same count, which the
+/// server refuses again, so nothing stale can be traded.
+nonisolated let kRegradedTermsUnavailable = "This card was regraded, but its new terms could not be loaded. "
+    + "Close this and pull to refresh to see them; approving these terms is refused."
 
 nonisolated struct DecisionResult: Hashable, Sendable {
     let outcome: DecisionOutcome
@@ -265,9 +278,12 @@ nonisolated struct PendingSignalsState: Hashable, Sendable {
     var tracks: [SwingApprovalTrack] = []
     /// Pending signals whose last approval the broker refused: id -> why.
     var refusals: [String: SwingRefusal] = [:]
+    /// Signal ids whose regrade request is in flight.
+    var regrading: Set<String> = []
 
     func isDeciding(_ id: String) -> Bool { deciding.contains(id) }
     func isResending(_ id: String) -> Bool { resending.contains(id) }
+    func isRegrading(_ id: String) -> Bool { regrading.contains(id) }
 }
 
 // MARK: - The repository seam
@@ -278,11 +294,14 @@ nonisolated protocol SwingSignalsSource: Sendable {
     func pendingSignals(_ instanceId: String) async throws -> [SwingSignal]
     func approvedSignals(_ instanceId: String) async throws -> [SwingSignal]
     func signalsWithStatus(_ instanceId: String, _ status: String) async throws -> [SwingSignal]
-    func decide(_ instanceId: String, _ signalId: String, _ decision: String, reason: String?) async throws -> DecisionReceipt
+    func decide(_ instanceId: String, _ signalId: String, _ decision: String, reason: String?, expectRegradeCount: Int?) async throws -> DecisionReceipt
     func resend(_ instanceId: String, _ signalId: String) async throws -> DecisionReceipt
     func wheel(_ instanceId: String) async throws -> WheelSnapshot
     func commandStatus(_ commandId: String) async throws -> SwingCommandStatus
     func recentSignals(_ instanceId: String, limit: Int) async throws -> [SwingSignal]
+    func regradeSignal(_ instanceId: String, _ signalId: String) async throws -> SwingSignal
+    func startWheelRun(_ instanceId: String) async throws -> WheelRunStatus
+    func wheelRunStatus(_ instanceId: String) async throws -> WheelRunStatus
 }
 
 extension SwingRepository: SwingSignalsSource {}
@@ -337,6 +356,9 @@ final class PendingSignalsModel {
     @ObservationIgnored private var trackList: [SwingApprovalTrack] = []
     /// Pending signals whose last approval the broker refused.
     @ObservationIgnored private var refusalMap: [String: SwingRefusal] = [:]
+    /// id -> the row a regrade request answered, until the list shows its
+    /// regrade (`withLocalRegrades`).
+    @ObservationIgnored private var localRegrades: [String: SwingSignal] = [:]
     /// The quick polls after an approval; nil turns them off (tests).
     @ObservationIgnored private let followSleep: PollingSleep?
     @ObservationIgnored private var followTask: Task<Void, Never>?
@@ -395,7 +417,11 @@ final class PendingSignalsModel {
             return
         }
         if gen > applied { applied = gen }
-        state = .loaded(apply(PendingSignalsState(), gen, load))
+        // A request still in flight keeps its guard across a rebuild.
+        var fresh = PendingSignalsState()
+        fresh.deciding = state.value?.deciding ?? []
+        fresh.regrading = state.value?.regrading ?? []
+        state = .loaded(apply(fresh, gen, load))
     }
 
     /// First load, then a poll every 30 s, pausing in the background.
@@ -535,7 +561,7 @@ final class PendingSignalsModel {
         }
         var next = current
         if let pending {
-            next.signals = visible(gen, pending, nonPending: (approved ?? []).map(\.id))
+            next.signals = withLocalRegrades(visible(gen, pending, nonPending: (approved ?? []).map(\.id)))
         }
         next.stuck = (base + joinedRows).filter {
             uncertainCard($0.id) == nil && !dismissedStuck.contains($0.id)
@@ -564,6 +590,9 @@ final class PendingSignalsModel {
         let gen = generation
         let load = await fetch()
         if gen < applied { return }
+        // Cut off because the caller went away (a poll's screen closed, or
+        // its task ended): not a failure, and not a whole answer either.
+        if Task.isCancelled || (load.error?.isCancellation ?? false) { return }
         guard let current = state.value else { return }
         if load.pending == nil, load.approved == nil {
             var next = current
@@ -586,7 +615,10 @@ final class PendingSignalsModel {
         next.deciding.insert(signal.id)
         state = .loaded(next)
         do {
-            let receipt = try await source().decide(instanceId, signal.id, decision, reason: reason)
+            let receipt = try await source().decide(
+                instanceId, signal.id, decision, reason: reason,
+                expectRegradeCount: swingExpectRegradeCount(signal, decision)
+            )
             hidden[signal.id] = generation
             forgetStuck(signal.id) // R3-2: a new decision forgets an old dismissal
             drop(signal.id)
@@ -602,6 +634,19 @@ final class PendingSignalsModel {
         } catch let err as ApiError {
             let code = err.statusCode
             let detail = err.message.trimmingCharacters(in: .whitespacesAndNewlines)
+            if code == 412 {
+                // Regraded since the operator saw it: re-read the cards so the
+                // review can show the new terms. Claim new terms only when the
+                // re-read brought a row with another regrade count.
+                release(signal.id)
+                await refresh()
+                let sent = swingExpectRegradeCount(signal, decision)
+                let fresh = state.value?.signals.first { $0.id == signal.id }
+                guard let fresh, swingExpectRegradeCount(fresh, decision) != sent else {
+                    return DecisionResult(.regraded, kRegradedTermsUnavailable)
+                }
+                return DecisionResult(.regraded, detail.isEmpty ? kRegradedSinceOpened : detail)
+            }
             if code == 400 || code == 404 || code == 409 {
                 drop(signal.id)
                 return DecisionResult(
@@ -763,12 +808,97 @@ final class PendingSignalsModel {
         next.deciding.remove(id)
         state = .loaded(next)
     }
+
+    // MARK: Regrade
+
+    /// How often the list is re-read while a regrade is live.
+    static let regradePollEvery: Duration = .seconds(4)
+
+    /// A visible card's regrade is queued or running and not stale: the
+    /// screen re-reads the list every `regradePollEvery` while this holds.
+    var regradeLive: Bool {
+        guard let signals = state.value?.signals else { return false }
+        let now = clock()
+        return signals.contains { swingRegradePhase($0, now: now) == .live }
+    }
+
+    /// Re-score one pending wheel card at today's prices. Never changes the
+    /// signal's status: the card stays, and the result lands on its row
+    /// about a minute later. The 200's row (regrade queued) shows at once.
+    /// Returns what to tell the operator when it was not queued, else nil
+    /// (also for a second tap, or a card whose regrade is still live).
+    func regrade(_ signal: SwingSignal) async -> String? {
+        guard let current = state.value,
+              let row = current.signals.first(where: { $0.id == signal.id }),
+              row.canRegrade,
+              !current.regrading.contains(row.id),
+              swingRegradePhase(row, now: clock()) != .live
+        else { return nil }
+        var next = current
+        next.regrading.insert(row.id)
+        state = .loaded(next)
+        do {
+            let answer = try await source().regradeSignal(instanceId, row.id)
+            endRegrading(row.id, answer: answer.id == row.id ? answer : nil)
+            return nil
+        } catch {
+            endRegrading(row.id, answer: nil)
+            if error.isCancellationOrTaskCancelled { return nil }
+            // 400/404/409/503 each leave the row saying something new (a
+            // regrade under way, a decision, a queue failure): read it.
+            if (error as? ApiError)?.statusCode != nil { await refresh() }
+            return swingActionErrorText(error, alreadyUnderWay: "A regrade of \(row.symbol) is already under way")
+        }
+    }
+
+    /// While a regrade is live, re-reads the list every
+    /// `regradePollEvery`, waiting out the background as the 30 s poll
+    /// does; returns once none is (done, failed or stale) or the calling task
+    /// is cancelled (the screen went away).
+    func pollRegrades(lifecycle: AppLifecycle? = nil, sleep: @escaping PollingSleep = realPollingSleep) async {
+        while regradeLive {
+            do { try await sleep(Self.regradePollEvery) } catch { return }
+            if let lifecycle { await lifecycle.untilForeground() }
+            if Task.isCancelled { return }
+            await refresh()
+        }
+    }
+
+    /// The request landed (or failed): the card takes the answered row,
+    /// which is kept until a list shows its regrade.
+    private func endRegrading(_ id: String, answer: SwingSignal?) {
+        var next = state.value ?? PendingSignalsState()
+        next.regrading.remove(id)
+        if let answer {
+            if answer.regrade?.requestedAt != nil { localRegrades[id] = answer }
+            next.signals = next.signals.map { $0.id == id ? answer : $0 }
+        }
+        state = .loaded(next)
+    }
+
+    /// A poll already in flight when a regrade's 200 arrived can carry the
+    /// row from before it. Such a row is replaced WHOLE by the answered row
+    /// (never patched: its terms and regrade count are one snapshot) until
+    /// the server's row says its regrade was asked at the same time or later.
+    /// An entry ends once the server catches up or the card is gone.
+    private func withLocalRegrades(_ rows: [SwingSignal]) -> [SwingSignal] {
+        var keep: [String: SwingSignal] = [:]
+        let out = rows.map { row -> SwingSignal in
+            guard let mine = localRegrades[row.id], let ours = mine.regrade?.requestedAt else { return row }
+            if let theirs = row.regrade?.requestedAt, theirs >= ours { return row }
+            keep[row.id] = mine
+            return mine
+        }
+        localRegrades = keep
+        return out
+    }
 }
 
 // MARK: - Wheel snapshot
 
 /// `wheelSnapshotProvider`: the wheel lane's book, loaded on open and on
-/// pull-to-refresh / Retry.
+/// pull-to-refresh / Retry, and its manual "Run wheel now" (start, status,
+/// and a 4 s poll while a run is in progress).
 @Observable
 final class WheelModel {
     let instanceId: String
@@ -806,5 +936,90 @@ final class WheelModel {
     func retry() async {
         state = .loading
         await load()
+    }
+
+    // MARK: Manual run
+
+    /// How often a run in progress is re-read.
+    static let runPollEvery: Duration = .seconds(4)
+
+    /// The newest manual run; nil until the first read answers.
+    private(set) var run: WheelRunStatus?
+    /// The start request is in flight.
+    private(set) var runStarting = false
+    /// Why the last start was refused; cleared by the next start or when a
+    /// run is seen to finish.
+    private(set) var runError: String?
+    /// The last status read failed (the last good run stays shown).
+    private(set) var runReadError: String?
+    /// Runs this model saw finish: the screen refreshes the pending cards on
+    /// each one.
+    private(set) var runsFinished = 0
+    /// Each status read takes the next number when it is sent, and a start
+    /// takes one when its 200 arrives (the run row exists from then on). An
+    /// answer older than the last one applied is dropped, so a read sent
+    /// before a start's 200 (or overlapping a newer read) never undoes what
+    /// is on screen, and a read answered during the start never drops it.
+    @ObservationIgnored private var runSeq = 0
+    @ObservationIgnored private var runApplied = 0
+
+    /// The server's `in_progress`.
+    var runInProgress: Bool { run?.inProgress ?? false }
+
+    /// GET .../wheel/scan: on open (to resume a run in progress or show the
+    /// last one's summary) and on every poll.
+    func loadRun() async {
+        runSeq += 1
+        let seq = runSeq
+        do {
+            let status = try await source().wheelRunStatus(instanceId)
+            guard seq > runApplied else { return }
+            runApplied = seq
+            let wasRunning = runInProgress
+            run = status
+            runReadError = nil
+            if wasRunning, !status.inProgress {
+                runError = nil
+                runsFinished += 1
+            }
+        } catch {
+            guard seq > runApplied, !error.isCancellationOrTaskCancelled else { return }
+            runReadError = swingErrorText(error)
+        }
+    }
+
+    /// "Run wheel now", once confirmed. It only makes review cards. A 409
+    /// means a run is already going: read it, so its progress shows.
+    func startRun() async {
+        guard !runStarting, !runInProgress else { return }
+        runStarting = true
+        runError = nil
+        do {
+            // Only `in_progress` matters here: the run itself is followed
+            // through GET (the instance deletes a duplicate run's row).
+            let status = try await source().startWheelRun(instanceId)
+            runStarting = false
+            runSeq += 1
+            runApplied = runSeq
+            run = status
+            runReadError = nil
+        } catch {
+            runStarting = false
+            if error.isCancellationOrTaskCancelled { return }
+            runError = swingActionErrorText(error, alreadyUnderWay: "A wheel run is already under way")
+            if (error as? ApiError)?.statusCode == 409 { await loadRun() }
+        }
+    }
+
+    /// While a run is in progress, re-reads it every `runPollEvery`,
+    /// waiting out the background as the 30 s poll does; returns once it is
+    /// not, or the calling task is cancelled (the screen went away).
+    func pollRun(lifecycle: AppLifecycle? = nil, sleep: @escaping PollingSleep = realPollingSleep) async {
+        while runInProgress {
+            do { try await sleep(Self.runPollEvery) } catch { return }
+            if let lifecycle { await lifecycle.untilForeground() }
+            if Task.isCancelled { return }
+            await loadRun()
+        }
     }
 }

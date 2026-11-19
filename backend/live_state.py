@@ -46,7 +46,10 @@ DEFAULT_MAX_FILES = int(os.environ.get("LIVE_TRADING_LOG_MAX_FILES", "50"))
 MAX_RECENT_TRADES = int(os.environ.get("LIVE_STATE_MAX_RECENT_TRADES", "100"))
 MAX_PORTFOLIO_HISTORY = int(os.environ.get("LIVE_STATE_MAX_PORTFOLIO_HISTORY", "500"))
 
-VALID_COMMAND_TYPES = frozenset({"halt", "close_position", "submit_order"})
+# swing_regrade / wheel_manual_scan (swing_trader/wheel_manual.py) place no
+# order: they re-score wheel candidates and write signal rows.
+VALID_COMMAND_TYPES = frozenset({"halt", "close_position", "submit_order",
+                                 "swing_regrade", "wheel_manual_scan"})
 TERMINAL_COMMAND_STATUSES = frozenset(
     {"completed", "failed", "reconciliation_required"}
 )

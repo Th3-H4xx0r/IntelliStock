@@ -116,4 +116,4 @@ def test_the_table_names_are_the_contracts():
     assert refdata.SWING_TABLES == ("SwingSignals", "SwingWheelScans",
                                     "SwingIvSnapshots", "SwingMacroDaily",
                                     "SwingIndexMembership", "SwingSectorMap",
-                                    "SwingDailyBars")
+                                    "SwingDailyBars", "SwingWheelRuns")

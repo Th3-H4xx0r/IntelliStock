@@ -63,9 +63,20 @@ def new_signal(*, instance_id, lane, symbol, session, score, recommendation, rea
 
 def insert_signal(doc: dict) -> str:
     """Insert once; a row that already exists (a resumed scan) is kept."""
-    ensure_tables()
-    store.insert(SIGNALS_TABLE, doc, conflict="error")
+    insert_signal_once(doc)
     return doc["id"]
+
+
+def insert_signal_once(doc: dict) -> bool:
+    """insert_signal, saying whether THIS call wrote the row. False when a row
+    with the id already existed: the store does not raise on a duplicate
+    (conflict="error" counts it in `errors` and writes nothing)."""
+    ensure_tables()
+    res = store.insert(SIGNALS_TABLE, doc, conflict="error")
+    try:
+        return int(res.get("inserted") or 0) > 0
+    except AttributeError:          # a store that returns no result object
+        return True
 
 
 def get_signal(signal_id):

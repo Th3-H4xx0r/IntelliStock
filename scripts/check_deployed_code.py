@@ -97,6 +97,7 @@ FILES = (
     "backend/swing_trader/notify.py",
     "backend/swing_trader/refdata.py",
     "backend/swing_trader/signals_store.py",
+    "backend/swing_trader/wheel_manual.py",
     "backend/swing_trader/refdata_build.py",
     "backend/swing_trader/refdata_sync.py",
     "backend/swing_trader/backtest_bars.py",

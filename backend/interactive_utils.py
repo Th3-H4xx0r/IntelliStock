@@ -6678,6 +6678,13 @@ class SwingDecisionRaceError(RuntimeError):
     """This click lost the compare-and-swap to a concurrent decision (409)."""
 
 
+class SwingRegradeMismatchError(RuntimeError):
+    """An approval sent with `expect_regrade_count` for a card that has been
+    regraded since (412): the strike, size and score it would trade are not
+    the ones the operator reviewed. Distinct from SwingDecisionRaceError (409,
+    decided elsewhere) so a client can tell the two apart by status."""
+
+
 class SwingResendConflictError(RuntimeError):
     """A re-send refused (409): the signal is not approved, or a broker
     command for it is still pending or running."""
@@ -6757,7 +6764,7 @@ def action_swing_list_signals(conn, instance_id, status=None, limit=100):
 
 
 def action_swing_decide_signal(conn, instance_id, signal_id, decision, reason=None,
-                               decided_by=None):
+                               decided_by=None, expect_regrade_count=None):
     """Decide a pending signal (interfaces §9 item 2). Not pending:
     SignalConflict, a ValueError (400). Unknown or another instance's:
     LookupError (404). Lost the compare-and-swap: SwingDecisionRaceError
@@ -6766,7 +6773,13 @@ def action_swing_decide_signal(conn, instance_id, signal_id, decision, reason=No
     pending (again) and SwingBrokerUnavailableError (503). A queue write that
     raised but may have landed: {"uncertain": True, "detail", ...}, which the
     route answers as 202 (FW-api-I1, _swing_after_failed_enqueue). A
-    rejection needs no broker."""
+    rejection needs no broker.
+
+    `expect_regrade_count`: the card's `regrade.count` (0 when never
+    regraded) as the client rendered it. On an approval that no longer
+    matches, SwingRegradeMismatchError (412): a regrade rewrote the strike,
+    size and score since. Absent: no check (older clients). A rejection is
+    never checked."""
     from swing_trader import approvals, signals_store
     inst, real_id = _swing_instance(conn, instance_id)
     signal = _swing_read(lambda: signals_store.get_signal(signal_id), None)
@@ -6775,6 +6788,12 @@ def action_swing_decide_signal(conn, instance_id, signal_id, decision, reason=No
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     decided = approvals.decide(signal, decision, decided_by, reason, now_iso)
     approving = decided["status"] in approvals.APPROVED_STATUSES
+    if approving and expect_regrade_count is not None:
+        current = int(((signal.get("regrade") or {}).get("count")) or 0)
+        if int(expect_regrade_count) != current:
+            raise SwingRegradeMismatchError(
+                "This card was regraded since you opened it; review the new terms "
+                "and approve again.")
     if approving and not inst.get("runCommand", False):
         raise SwingBrokerUnavailableError(
             "Instance %s is not running, so the approval could not reach the broker; "
@@ -7031,6 +7050,148 @@ def _wheel_put_fields(p, parsed):
     except ValueError:
         expiry = parsed[1]
     return underlying, strike, expiry
+
+
+#: The swing-port lanes and the config flag that switches each on, as
+#: broker._LANE_ENABLE_FLAGS names them.
+_SWING_LANE_FLAGS = {
+    "strategy_swing": "strategy_swing_enabled", "strategyswing": "strategy_swing_enabled",
+    "strategy_wheel": "strategy_wheel_enabled", "strategywheel": "strategy_wheel_enabled",
+}
+
+
+def _swing_flag_on(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _swing_lane_enabled(inst, lane) -> bool:
+    """broker._lane_enabled, over the instance's strategy document as
+    broker.load_strategies_from_db loads it (specs with a `strategy` and a
+    `weight`; settings are `conditions` under `config`). broker.py cannot be
+    imported here, so this mirrors it; keep the two in step."""
+    flag = _SWING_LANE_FLAGS.get(str(lane or "").strip().lower())
+    strategy_id = (inst or {}).get("strategy_id")
+    if flag is None or strategy_id is None:
+        return False
+    try:
+        doc = store.get("Strategies", strategy_id)
+    except Exception as exc:
+        _swing_log("strategy %s unreadable for the lane check (%s)" % (strategy_id, exc),
+                   "yellow")
+        return False
+    specs = (doc or {}).get("strategies")
+    for spec in (specs if isinstance(specs, list) else []):
+        try:
+            if (not isinstance(spec, dict) or spec.get("strategy") is None
+                    or "weight" not in spec):
+                continue
+            if _SWING_LANE_FLAGS.get(str(spec.get("strategy")).strip().lower()) != flag:
+                continue
+            merged = dict(spec.get("conditions") or {})
+            merged.update(dict(spec.get("config") or {}))
+            if _swing_flag_on(merged.get(flag, False)):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _swing_require_wheel_lane(inst):
+    if not _swing_lane_enabled(inst, "strategy_wheel"):
+        raise ValueError("this instance has no enabled wheel lane")
+
+
+def _swing_require_running(inst, real_id, what):
+    if not inst.get("runCommand", False):
+        raise SwingBrokerUnavailableError(
+            "Instance %s is not running, so %s could not reach it" % (real_id, what))
+    if inst.get("crashed"):
+        raise SwingBrokerUnavailableError(
+            "Instance %s has crashed, so %s could not reach it" % (real_id, what))
+
+
+def action_swing_regrade_signal(conn, instance_id, signal_id, requested_by=None):
+    """Ask the instance to re-score one pending wheel signal at today's bars
+    (swing_trader/wheel_manual.py). Marks the row's `regrade` block queued and
+    queues a swing_regrade LiveCommand; the instance rewrites the score,
+    strike and reasoning in place and sets the block to done or failed. The
+    signal stays pending throughout.
+
+    Not a pending wheel signal: ValueError (400). Unknown or another
+    instance's: LookupError (404). A regrade already under way:
+    SwingDecisionRaceError (409). The instance is not running, or the command
+    could not be queued: SwingBrokerUnavailableError (503). The instance's
+    strategy has no enabled wheel lane: ValueError (400)."""
+    from swing_trader import signals_store, wheel_manual
+    inst, real_id = _swing_instance(conn, instance_id)
+    signal = _swing_read(lambda: signals_store.get_signal(signal_id), None)
+    if not signal or str(signal.get("instance_id") or "") != real_id:
+        raise LookupError("Signal not found: %s" % signal_id)
+    _swing_require_wheel_lane(inst)
+    if signal.get("lane") != "wheel":
+        raise ValueError("only wheel signals can be regraded")
+    if signal.get("status") != "pending":
+        raise ValueError("signal %s is %s, not pending" % (signal_id, signal.get("status")))
+    if wheel_manual.regrade_in_progress(signal):
+        raise SwingDecisionRaceError("signal %s is already being regraded" % signal_id)
+    _swing_require_running(inst, real_id, "the regrade")
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    block = wheel_manual.request_block(signal, requested_by, now_iso)
+    signals_store.update_signal(signal_id, {"regrade": block})
+    try:
+        cmd = action_submit_live_command(
+            conn, real_id, wheel_manual.REGRADE_COMMAND,
+            {"signal_id": str(signal_id), "instance_id": real_id}, requested_by)
+    except Exception as exc:
+        signals_store.update_signal(signal_id, {"regrade": wheel_manual.failed_block(
+            dict(signal, regrade=block), "could not be queued: %s" % exc, now_iso)})
+        raise SwingBrokerUnavailableError("the regrade could not be queued: %s" % exc)
+    return {"signal": dict(signal, regrade=block),
+            "command_id": (cmd or {}).get("command_id")}
+
+
+def action_wheel_manual_scan(conn, instance_id, requested_by=None):
+    """Start a wheel scan now (swing_trader/wheel_manual.py). REVIEW ONLY: it
+    writes pending cards and places no order. One run at a time per instance:
+    SwingDecisionRaceError (409) while one is under way. Not running, or the
+    command could not be queued: SwingBrokerUnavailableError (503). No enabled
+    wheel lane on the instance's strategy: ValueError (400)."""
+    from swing_trader import signals_store, wheel_manual
+    from swing_trader.refdata import RUNS_TABLE
+    _store = wheel_manual.store
+    inst, real_id = _swing_instance(conn, instance_id)
+    _swing_require_wheel_lane(inst)
+    signals_store.ensure_tables()
+    if wheel_manual.run_in_progress(wheel_manual.latest_run(real_id)):
+        raise SwingDecisionRaceError("a wheel run is already under way for %s" % real_id)
+    _swing_require_running(inst, real_id, "the wheel run")
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    run = wheel_manual.new_run(real_id, requested_by, now_iso)
+    run["phase"] = "queued"
+    _store.insert(RUNS_TABLE, dict(run), conflict="replace")
+    try:
+        cmd = action_submit_live_command(
+            conn, real_id, wheel_manual.SCAN_COMMAND,
+            {"run_id": run["id"], "instance_id": real_id, "requested_by": requested_by},
+            requested_by)
+    except Exception as exc:
+        _store.update(RUNS_TABLE, run["id"], {
+            "status": "failed", "phase": "failed", "finished_at": now_iso,
+            "error": "could not be queued: %s" % exc})
+        raise SwingBrokerUnavailableError("the wheel run could not be queued: %s" % exc)
+    return {"run": run, "in_progress": True, "command_id": (cmd or {}).get("command_id")}
+
+
+def action_wheel_manual_scan_status(conn, instance_id):
+    """{"run": the newest manual run row or null, "in_progress": bool}. A run
+    whose heartbeat stopped (the instance restarted under it) reads as not in
+    progress, so the button comes back."""
+    from swing_trader import wheel_manual
+    _inst, real_id = _swing_instance(conn, instance_id)
+    run = _swing_read(lambda: wheel_manual.latest_run(real_id), None)
+    return {"run": run, "in_progress": wheel_manual.run_in_progress(run)}
 
 
 def action_wheel_overview(conn, instance_id, *, today=None):

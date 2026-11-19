@@ -2,12 +2,21 @@
      The wheel lane's book: open cash-secured puts, the collateral they tie
      up, how far each is from being assigned, and the latest weekly scans.
 
-     Read-only. The lane buys puts back by itself (the 15:45 ET monitor and the
-     Monday 2x-premium check), so the ITM column is coloured by exactly those
-     rules: red means the monitor will buy this put back on its next pass.
+     The book is read-only. The lane buys puts back by itself (the 15:45 ET
+     monitor and the Monday 2x-premium check), so the ITM column is coloured by
+     exactly those rules: red means the monitor will buy this put back on its
+     next pass.
      GET /instances/{id}/wheel; the shape is the plan C Contract addendum.
      The header stamps the last successful load ("as of 14:02"): after a failed
-     poll the book on screen is that one. Only a 401 stops polling. -->
+     poll the book on screen is that one. Only a 401 stops polling.
+
+     "Run wheel now" (POST /instances/{id}/wheel/scan) runs the weekly scan on
+     demand, after a confirm step. It only adds review cards and never places
+     an order (operator ruling 2026-11-18). While the server says a run is in
+     progress the button is disabled and GET .../wheel/scan is read every 4 s
+     for its phase and counts; when it ends, the summary shows and
+     `run-finished` asks the page to re-read the pending cards. On open one GET
+     resumes a run in progress or shows the last run. -->
 <template>
   <section class="min-w-0" aria-labelledby="wheel-title">
     <div class="flex items-center justify-between gap-3 min-h-8 mb-3">
@@ -34,6 +43,74 @@
     </div>
 
     <div class="ui-card overflow-hidden">
+      <!-- Manual run: review cards only -->
+      <div class="px-5 py-4 border-b border-white/[0.06]">
+        <div class="flex items-start justify-between gap-3 flex-wrap">
+          <div class="min-w-0">
+            <p class="text-sm text-slate-100">Run the scan now</p>
+            <p class="text-xs text-slate-500 mt-0.5">Scores today's candidates and adds review cards. Places no orders.</p>
+          </div>
+          <button
+            v-if="!runConfirming"
+            @click="startRunConfirm"
+            :disabled="runBusy"
+            class="ui-btn shrink-0 inline-flex items-center gap-1.5 disabled:opacity-60"
+          >
+            <span
+              v-if="runBusy"
+              class="material-symbols-outlined text-[16px] animate-spin"
+              aria-hidden="true"
+            >progress_activity</span>
+            {{ runView.state === 'running' ? 'Running…' : 'Run wheel now' }}
+          </button>
+        </div>
+
+        <div v-if="runConfirming" class="mt-3 rounded-lg border border-white/[0.07] bg-raised px-4 py-3">
+          <p class="text-sm text-slate-200">{{ RUN_CONFIRM }}</p>
+          <div class="flex gap-2 mt-3 flex-wrap">
+            <button
+              @click="startRun"
+              :disabled="runBusy"
+              class="ui-btn-primary h-8 px-3 text-[13px]"
+            >{{ runStarting ? 'Starting…' : 'Confirm run' }}</button>
+            <button
+              @click="runConfirming = false"
+              :disabled="runStarting"
+              class="ui-btn-ghost"
+            >Cancel</button>
+          </div>
+        </div>
+
+        <div v-if="runView.state === 'running'" class="mt-3" role="status">
+          <p class="flex items-center gap-2 text-sm text-slate-300 tabular-nums">
+            <span class="ui-dot ui-dot-live"></span>
+            <span class="break-words">{{ runView.progress }}</span>
+          </p>
+          <p v-if="runView.when" class="text-xs text-slate-500 mt-1 tabular-nums">Started {{ runView.when }}</p>
+        </div>
+        <div v-else-if="runView.state === 'done'" class="mt-3">
+          <p class="text-xs text-slate-500 tabular-nums">
+            {{ runView.when ? `Last run ${runView.when}` : 'Last run' }} · nothing was ordered
+          </p>
+          <dl class="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 mt-2">
+            <div v-for="c in runView.counts" :key="c.label" class="min-w-0">
+              <dt class="text-xs text-slate-500">{{ c.label }}</dt>
+              <dd class="text-sm text-slate-100 tabular-nums mt-0.5">{{ c.value }}</dd>
+            </div>
+          </dl>
+        </div>
+        <div v-else-if="runView.error" class="mt-3">
+          <p class="flex items-start gap-2 text-sm text-slate-300">
+            <span class="ui-dot mt-2" :class="runView.state === 'failed' ? 'ui-dot-error' : 'ui-dot-warn'"></span>
+            <span class="break-words">{{ runView.error }}</span>
+          </p>
+          <p v-if="runView.when" class="text-xs text-slate-500 mt-1 tabular-nums">Last run {{ runView.when }}</p>
+        </div>
+
+        <p v-if="runError" class="mt-3 text-sm text-loss break-words" role="alert">{{ runError }}</p>
+        <p v-else-if="runLoadError" class="mt-3 text-sm text-loss break-words">{{ runLoadError }}</p>
+      </div>
+
       <div v-if="loadNote || loadError" class="px-5 pt-4 space-y-2" :class="loaded ? '' : 'pb-4'">
         <div v-if="loadNote" class="rounded-lg border border-white/[0.07] bg-raised px-4 py-3 text-sm text-slate-400">
           {{ loadNote }}
@@ -148,13 +225,19 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { getToken } from '../../utils/auth.js'
-import { detailText, fmtAsOf, fmtItm, fmtUsd, itmTone, parseWheelPayload, wheelLoadFailure } from '../../utils/swing.js'
+import {
+  classifyRunFailure, detailText, fmtAsOf, fmtItm, fmtUsd, itmTone, manualRunView, parseWheelPayload, wheelLoadFailure,
+} from '../../utils/swing.js'
 import {
   WHEEL_SCAN_TONE_CLASSES, normalizeRecentSignals, swingSignalAnchor, wheelScanSignal, wheelScanStatus,
 } from '../../utils/swingReview.js'
 
 // The wheel changes a few times a day; a minute is plenty.
 const POLL_MS = 60000
+// A manual run in progress (phases change every few seconds to minutes).
+const RUN_POLL_MS = 4000
+const RUN_CONFIRM = 'Run the wheel scan now? It screens today\'s candidates and makes one AI call per candidate that '
+  + 'passes, so it can take several minutes. It only adds review cards: it places no orders, even at score 75+.'
 
 const props = defineProps({
   instanceId: { type: String, required: true },
@@ -165,7 +248,8 @@ const props = defineProps({
   refreshKey: { type: Number, default: 0 },
 })
 // cash: the account's cash, for the order review's collateral warning.
-const emit = defineEmits(['cash'])
+// run-finished: a manual run this page watched has ended (re-read the pending cards).
+const emit = defineEmits(['cash', 'run-finished'])
 
 const wheel = ref(parseWheelPayload(null))
 const loading = ref(false)
@@ -177,6 +261,23 @@ const loadedAt = ref(null)    // Date of the last successful load
 // log's own status is written at scan time and never updated (iOS WheelModel).
 const recentSignals = ref([])
 let pollTimer = null
+
+// -- Manual run (GET / POST .../wheel/scan) -------------------------------------
+const run = ref(null)            // the newest run row, or null
+const runInProgress = ref(false) // the server's in_progress, trusted as is
+const runConfirming = ref(false)
+const runStarting = ref(false)   // the POST is in flight
+const runError = ref('')         // why the last POST was refused
+const runLoadError = ref('')     // the last GET failed
+const runView = computed(() => manualRunView(run.value, runInProgress.value))
+const runBusy = computed(() => runStarting.value || runView.value.state === 'running')
+let runTimer = null
+let runLoading = false
+let runReloadQueued = false // read again after the GET in flight (it may predate a POST)
+// Bumped when a POST answers: a GET sent before that answer is dropped, so a
+// stale "not in progress" cannot cancel the run the POST just started.
+let runPostSeq = 0
+let disposed = false
 
 function authHeaders() {
   const token = getToken()
@@ -265,6 +366,127 @@ function pnlClass(value) {
 }
 
 
+function scanUrl() {
+  return `${props.apiBase}/instances/${encodeURIComponent(props.instanceId)}/wheel/scan`
+}
+
+/** Show a run row; poll while in progress; a run this page saw end refreshes the cards. */
+function applyRun(row, inProgress) {
+  const wasRunning = runInProgress.value
+  run.value = row && typeof row === 'object' ? row : null
+  runInProgress.value = inProgress
+  // A POST refusal is about the state before; it goes when a run starts or ends.
+  if (wasRunning !== inProgress) runError.value = ''
+  if (inProgress) {
+    runConfirming.value = false // a run is under way: nothing to confirm
+    startRunPolling()
+    return
+  }
+  stopRunPolling()
+  if (wasRunning) {
+    emit('run-finished')
+    load() // the run wrote scan rows
+  }
+}
+
+async function loadRun({ queue = false } = {}) {
+  if (disposed) return
+  if (runLoading) {
+    if (queue) runReloadQueued = true
+    return
+  }
+  runLoading = true
+  const instanceAtStart = props.instanceId
+  const seq = runPostSeq
+  try {
+    const res = await fetch(scanUrl(), { headers: authHeaders() })
+    if (disposed || props.instanceId !== instanceAtStart || seq !== runPostSeq) return
+    if (!res.ok) {
+      let detail = ''
+      try { detail = detailText((await res.json())?.detail) } catch { /* keep */ }
+      if (res.status === 401) {
+        stopRunPolling()
+        runLoadError.value = 'Session expired — please sign in again.'
+        return
+      }
+      runLoadError.value = detail || `Could not read the wheel run (${res.status})`
+      return
+    }
+    const body = await res.json()
+    if (disposed || props.instanceId !== instanceAtStart || seq !== runPostSeq) return
+    runLoadError.value = ''
+    applyRun(body?.run ?? null, body?.in_progress === true)
+  } catch (e) {
+    if (disposed || props.instanceId !== instanceAtStart || seq !== runPostSeq) return
+    runLoadError.value = e?.message || 'Could not read the wheel run'
+  } finally {
+    // An instance switch already reset the flags for the new instance's read.
+    if (props.instanceId === instanceAtStart) {
+      runLoading = false
+      if (runReloadQueued && !disposed) {
+        runReloadQueued = false
+        loadRun()
+      }
+    }
+  }
+}
+
+function startRunConfirm() {
+  if (runBusy.value) return
+  runError.value = ''
+  runConfirming.value = true
+}
+
+async function startRun() {
+  if (runStarting.value || runInProgress.value) return
+  runStarting.value = true
+  runError.value = ''
+  const instanceAtStart = props.instanceId
+  try {
+    const res = await fetch(scanUrl(), { method: 'POST', headers: authHeaders() })
+    if (disposed || props.instanceId !== instanceAtStart) return
+    runPostSeq += 1
+    runConfirming.value = false
+    if (res.ok) {
+      let body = null
+      try { body = await res.json() } catch { /* the GET poll reads it */ }
+      applyRun(body?.run ?? null, body?.in_progress !== false)
+      return
+    }
+    let detail = ''
+    try { detail = (await res.json())?.detail } catch { /* keep */ }
+    const verdict = classifyRunFailure(res.status, detail)
+    runError.value = verdict.message
+    if (verdict.stopPolling) {
+      stopPolling()
+      stopRunPolling()
+    }
+    // Re-read the status once after any refusal: a 409 shows the run under
+    // way, and a 503/400 brings back the last-run summary, since a GET that
+    // was out when this POST answered is dropped (runPostSeq). Queued if one
+    // is still out.
+    if (!verdict.stopPolling) loadRun({ queue: true })
+  } catch (e) {
+    if (disposed || props.instanceId !== instanceAtStart) return
+    runConfirming.value = false
+    runError.value = classifyRunFailure(0, e?.message).message
+  } finally {
+    runStarting.value = false
+  }
+}
+
+function startRunPolling() {
+  if (runTimer || disposed) return
+  runTimer = setInterval(() => loadRun(), RUN_POLL_MS)
+}
+
+function stopRunPolling() {
+  if (runTimer) {
+    clearInterval(runTimer)
+    runTimer = null
+  }
+}
+
 function startPolling() {
   stopPolling()
   pollTimer = setInterval(load, POLL_MS)
@@ -280,9 +502,14 @@ function stopPolling() {
 onMounted(() => {
   load()
   startPolling()
+  loadRun()
 })
 
-onUnmounted(stopPolling)
+onUnmounted(() => {
+  disposed = true
+  stopPolling()
+  stopRunPolling()
+})
 
 watch(() => props.refreshKey, (next, prev) => {
   if (next !== prev) loadSignals()
@@ -296,7 +523,16 @@ watch(() => props.instanceId, (next, prev) => {
   loadError.value = ''
   loadNote.value = ''
   loadedAt.value = null
+  stopRunPolling()
+  run.value = null
+  runInProgress.value = false
+  runConfirming.value = false
+  runError.value = ''
+  runLoadError.value = ''
+  runLoading = false
+  runReloadQueued = false
   load()
   startPolling()
+  loadRun()
 })
 </script>

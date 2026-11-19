@@ -12,17 +12,17 @@ from db.store import P  # noqa: E402
 
 SWING_TABLES = ("SwingSignals", "SwingWheelScans", "SwingIvSnapshots",
                 "SwingMacroDaily", "SwingIndexMembership", "SwingSectorMap",
-                "SwingDailyBars")
+                "SwingDailyBars", "SwingWheelRuns")
 
 
-def test_the_seven_tables_are_registered_with_text_ids():
+def test_the_swing_tables_are_registered_with_text_ids():
     for name in SWING_TABLES:
         assert name in schema.ALL_TABLES, name
         assert schema.spec(name).id_type == "text", name
 
 
 def test_the_record_tables_index_instance_id():
-    for name in ("SwingSignals", "SwingWheelScans"):
+    for name in ("SwingSignals", "SwingWheelScans", "SwingWheelRuns"):
         assert schema.TABLES[name].indexed_fields == ("instance_id",)
 
 

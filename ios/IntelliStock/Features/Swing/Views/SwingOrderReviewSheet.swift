@@ -7,10 +7,14 @@ struct SwingOrderReview: Identifiable {
     let signal: SwingSignal
     /// "approve" or "approve_half".
     let decision: String
-    /// Sends the decision (a REAL trading action).
-    let send: () async -> DecisionResult
+    /// Sends the decision for the row the sheet shows (a REAL trading
+    /// action).
+    let send: (SwingSignal) async -> DecisionResult
     /// After the sheet closes on a result.
     let finished: (DecisionResult) -> Void
+    /// The signal's current row, read after a 412 (regraded since the sheet
+    /// opened) so the sheet shows the new terms; nil when it is gone.
+    var latest: () -> SwingSignal? = { nil }
     /// A rehearsal: a sample order, and `send` never reaches the server.
     var demo = false
 
@@ -32,7 +36,7 @@ struct SwingOrderReview: Identifiable {
                 "status": "pending",
             ]),
             decision: "approve",
-            send: {
+            send: { _ in
                 try? await Task.sleep(for: .milliseconds(700))
                 return DecisionResult(.recorded, "Demo: nothing was sent.")
             },
@@ -61,6 +65,13 @@ struct SwingOrderReviewSheet: View {
     @State private var launched = false
     /// Where the finger is during a drag, in the sheet's (unmoving) space.
     @State private var fingerY: CGFloat?
+    /// The row after a 412 re-read; nil shows the row the sheet opened on.
+    @State private var shown: SwingSignal?
+    /// Why the sheet came back to the order (the server's 412 detail).
+    @State private var notice: String?
+
+    /// The row on screen, and the one an approval sends.
+    private var signal: SwingSignal { shown ?? review.signal }
 
     enum Phase: Equatable {
         case review
@@ -104,6 +115,12 @@ struct SwingOrderReviewSheet: View {
         }
     }
 
+    /// Nothing was decided: a second tap (ignored), or the card was regraded
+    /// since the sheet opened (412). The sheet goes back to the order.
+    nonisolated static func reopens(_ result: DecisionResult) -> Bool {
+        result.outcome == .ignored || result.outcome == .regraded
+    }
+
     /// The approval reached the server: the broker takes it from here.
     nonisolated static func isSent(_ result: DecisionResult) -> Bool {
         result.outcome == .recorded || result.outcome == .uncertain
@@ -124,14 +141,14 @@ struct SwingOrderReviewSheet: View {
             let progress: CGFloat = reached ? 1 : min(max(0, -drag) / max(1, height * 0.6), 0.95)
             VStack(spacing: 0) {
                 // Its own view, so a drag moves it without rebuilding it.
-                let card = SwingOrderCard(review: review, cash: cash).equatable()
+                let card = SwingOrderCard(review: review, signal: signal, notice: notice, cash: cash).equatable()
                 ViewThatFits(in: .vertical) {
                     card
                     ScrollView { card }
                 }
                 Spacer(minLength: 0)
                 SwipeUpHint(
-                    label: fingerY == nil ? swingReviewActionLabel(review.signal, review.decision) : (reached ? "Release to send" : "All the way up"),
+                    label: fingerY == nil ? swingReviewActionLabel(signal, review.decision) : (reached ? "Release to send" : "All the way up"),
                     progress: progress,
                     onSend: launch
                 )
@@ -184,10 +201,17 @@ struct SwingOrderReviewSheet: View {
         guard phase == .review, !launched else { return }
         withAnimation(.easeIn(duration: 0.3)) { launched = true }
         withAnimation(.easeIn(duration: 0.2).delay(0.15)) { phase = .sending }
+        let sending = signal
         Task {
-            let result = await review.send()
-            if result.outcome == .ignored {
+            let result = await review.send(sending)
+            if Self.reopens(result) {
                 withAnimation(DSMotion.ease(0.35)) {
+                    if result.outcome == .regraded {
+                        // The cards were re-read: show the new terms, so a
+                        // second approval names the new regrade count.
+                        shown = review.latest() ?? sending
+                        notice = result.message
+                    }
                     phase = .review
                     launched = false
                     drag = 0
@@ -262,7 +286,7 @@ private struct SwingOrderOutcomeView: View {
     private var symbol: String {
         switch result.outcome {
         case .recorded, .uncertain: "checkmark.circle"
-        case .noLongerPending: "info.circle"
+        case .noLongerPending, .regraded: "info.circle"
         case .failed, .ignored: "xmark.circle"
         }
     }
@@ -270,7 +294,7 @@ private struct SwingOrderOutcomeView: View {
     private var tint: Color {
         switch result.outcome {
         case .recorded, .uncertain: DS.Palette.gain
-        case .noLongerPending: DS.Text.secondary
+        case .noLongerPending, .regraded: DS.Text.secondary
         case .failed, .ignored: DS.Palette.loss
         }
     }
@@ -280,6 +304,7 @@ private struct SwingOrderOutcomeView: View {
         case .recorded: "Sent to the broker"
         case .uncertain: "Approved"
         case .noLongerPending: "No longer pending"
+        case .regraded: "Card changed"
         case .failed, .ignored: "Not sent"
         }
     }
@@ -322,20 +347,25 @@ struct SwingPutPlan: Equatable {
 }
 
 /// The order itself, on the modal's card: the head (symbol, side, "Review
-/// the order before it goes to the broker"), then the plan, the chart, the
+/// the order before it goes to the broker", and for a put when its score was
+/// made), then a regrade's warning, the plan, the chart, the
 /// figures that matter, the collateral warning and the broker's caveat — the
 /// web review's order. Equatable on its inputs, so the sheet's drag never
 /// rebuilds it.
 private struct SwingOrderCard: View, Equatable {
     let review: SwingOrderReview
+    /// The row on screen (re-read after a 412).
+    let signal: SwingSignal
+    /// Why the sheet came back to the order, when it did.
+    let notice: String?
     let cash: Double?
 
     nonisolated static func == (a: Self, b: Self) -> Bool {
-        a.review.id == b.review.id && a.cash == b.cash
+        a.review.id == b.review.id && a.signal == b.signal && a.notice == b.notice && a.cash == b.cash
     }
 
     var body: some View {
-        let s = review.signal
+        let s = signal
         let put = SwingPutPlan(s)
         VStack(alignment: .leading, spacing: 0) {
             // Head (the web's `ui-modal-head`).
@@ -362,6 +392,13 @@ private struct SwingOrderCard: View, Equatable {
                 Text("Review the order before it goes to the broker")
                     .font(DS.Font.body)
                     .foregroundStyle(DS.Text.muted)
+                if s.isWheel {
+                    Text(swingScoredAtText(s))
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
+                        .padding(.top, 4)
+                }
             }
             .padding(.horizontal, 24)
             .padding(.top, 20)
@@ -370,6 +407,36 @@ private struct SwingOrderCard: View, Equatable {
             DSDivider()
 
             VStack(alignment: .leading, spacing: 20) {
+                // The card changed since the sheet opened (412): these are
+                // the new terms.
+                if let notice {
+                    HStack(alignment: .top, spacing: 8) {
+                        DSStatusDot(.warn)
+                            .padding(.top, 3)
+                        Text(notice)
+                            .font(DS.Font.bodyMedium)
+                            .foregroundStyle(DS.Text.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+
+                // A regrade that found the put no longer qualifies, or one
+                // that failed: the approval is still the operator's call.
+                if s.isWheel {
+                    ForEach(swingRegradeWarnings(s, now: Date()), id: \.self) { warning in
+                        HStack(alignment: .top, spacing: 8) {
+                            DSStatusDot(.warn)
+                                .padding(.top, 3)
+                            Text(warning)
+                                .font(DS.Font.body)
+                                .foregroundStyle(DS.Text.label)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+
                 if let put {
                     Text("\(put.summary) \(put.assignment)")
                         .font(DS.Font.body)

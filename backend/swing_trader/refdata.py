@@ -23,8 +23,10 @@ MEMBERSHIP_TABLE = "SwingIndexMembership"
 SECTOR_TABLE = "SwingSectorMap"
 #: The lane's own daily bars for backtests (swing_trader.backtest_bars).
 BARS_TABLE = "SwingDailyBars"
+#: Operator-triggered wheel runs (swing_trader/wheel_manual.py): one row per run.
+RUNS_TABLE = "SwingWheelRuns"
 SWING_TABLES = (SIGNALS_TABLE, SCANS_TABLE, IV_TABLE, MACRO_TABLE,
-                MEMBERSHIP_TABLE, SECTOR_TABLE, BARS_TABLE)
+                MEMBERSHIP_TABLE, SECTOR_TABLE, BARS_TABLE, RUNS_TABLE)
 
 #: A VIX row older than this, counted back from the session, is a data gap and
 #: not a weekend or holiday: the longest regular gap is Friday to the Tuesday
