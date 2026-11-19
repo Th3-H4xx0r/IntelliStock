@@ -10,6 +10,8 @@ named in FORWARDED_ALLOW_IPS and refuses the "trust everything" spellings.
 """
 from __future__ import annotations
 
+import contextlib
+import logging
 import os
 import sys
 from unittest.mock import Mock
@@ -34,6 +36,53 @@ from api import server_config  # noqa: E402
 async def tiny_app(scope, receive, send):
     await send({"type": "http.response.start", "status": 200, "headers": []})
     await send({"type": "http.response.body", "body": b"ok"})
+
+
+@contextlib.contextmanager
+def _logging_state_restored():
+    """Put back what building a uvicorn.Config does to logging.
+
+    The Config constructor runs dictConfig(uvicorn's LOGGING_CONFIG). That gives
+    the uvicorn loggers their own handlers and levels, stops them propagating,
+    and sets ``disabled = False`` on every other existing logger. Left in place
+    for the rest of the run, caplog on "uvicorn.error" in a later test file sees
+    nothing (test_brokerage_place_order.py did). Root's handlers are left alone:
+    pytest attaches and detaches its capture handlers there each test phase, and
+    dictConfig detaches none.
+    """
+    manager = logging.Logger.manager
+
+    def is_uvicorn(name):
+        return name == "uvicorn" or name.startswith("uvicorn.")
+
+    loggers = {n: lg for n, lg in manager.loggerDict.items() if isinstance(lg, logging.Logger)}
+    saved = {n: (lg.level, list(lg.handlers), lg.propagate, lg.disabled)
+             for n, lg in loggers.items() if is_uvicorn(n)}
+    saved_disabled = {n: lg.disabled for n, lg in loggers.items()}
+    root_level, root_disabled = logging.root.level, logging.root.disabled
+    try:
+        yield
+    finally:
+        for name, lg in list(manager.loggerDict.items()):
+            if not isinstance(lg, logging.Logger):
+                continue
+            if is_uvicorn(name):
+                # A uvicorn logger dictConfig created goes back to the defaults.
+                level, handlers, propagate, disabled = saved.get(name, (logging.NOTSET, [], True, False))
+                lg.setLevel(level)
+                lg.handlers[:] = handlers
+                lg.propagate = propagate
+                lg.disabled = disabled
+            elif name in saved_disabled:
+                lg.disabled = saved_disabled[name]
+        logging.root.setLevel(root_level)
+        logging.root.disabled = root_disabled
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging():
+    with _logging_state_restored():
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -152,12 +201,34 @@ def test_unset_forwarded_allow_ips_warns(monkeypatch):
     assert "FORWARDED_ALLOW_IPS" in log.warning.call_args.args[0]
 
 
+@pytest.mark.parametrize("raw", ["", "127.0.0.1", "::1,127.0.0.1", "*"])
+def test_a_value_that_names_no_proxy_warns_too(monkeypatch, raw):
+    # docker-compose defaults the variable to 127.0.0.1, so in production it is
+    # never unset; the warning has to fire for loopback-only values as well.
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", raw)
+    log = Mock(); monkeypatch.setattr(server_config, "_log", log)
+    build_uvicorn_config(tiny_app, host="0.0.0.0", port=8011, proxy_headers=True)
+    assert "FORWARDED_ALLOW_IPS names no reverse proxy" in log.warning.call_args.args[0]
+
+
 def test_a_configured_proxy_logs_what_it_trusts_and_does_not_warn(monkeypatch):
     monkeypatch.setenv("FORWARDED_ALLOW_IPS", "10.0.1.0/24")
     log = Mock(); monkeypatch.setattr(server_config, "_log", log)
     build_uvicorn_config(tiny_app, host="0.0.0.0", port=8011, proxy_headers=True)
     log.info.assert_called_once_with("Proxy headers: trusting X-Forwarded-For from %s", "10.0.1.0/24")
     log.warning.assert_not_called()
+
+
+def test_building_a_config_leaves_logging_as_it_found_it(caplog):
+    uv = logging.getLogger("uvicorn")
+    before = (uv.level, list(uv.handlers), uv.propagate)
+    with _logging_state_restored():
+        build_uvicorn_config(tiny_app, host="127.0.0.1", port=8011, proxy_headers=True)
+        assert uv.propagate is False                    # dictConfig really ran
+    assert (uv.level, list(uv.handlers), uv.propagate) == before
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        logging.getLogger("uvicorn.error").info("still reaches caplog")
+    assert "still reaches caplog" in caplog.text
 
 
 def test_run_server_exits_3_when_startup_fails(monkeypatch):

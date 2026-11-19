@@ -29,10 +29,13 @@ _LOOPBACK_ONLY = ["127.0.0.1"]
 # request (trusted_proxy_configured), and a bad entry must not log each time.
 _WARNED: set = set()
 
-_UNSET_WARNING = (
-    "FORWARDED_ALLOW_IPS is not set: X-Forwarded-For is trusted only from "
-    "127.0.0.1, so behind a reverse proxy every client shares the proxy's "
-    "address; the per-IP login limit stays off until it is set."
+# Logged at startup whenever the variable names no proxy: unset, blank, or
+# loopback only. docker-compose defaults it to 127.0.0.1, so "unset" alone
+# would never fire in production.
+_NO_PROXY_WARNING = (
+    "FORWARDED_ALLOW_IPS names no reverse proxy: X-Forwarded-For is trusted "
+    "only from %s, so behind a reverse proxy every client shares the proxy's "
+    "address; the per-IP login limit stays off until it names one."
 )
 
 
@@ -87,10 +90,11 @@ def trusted_proxy_configured(raw: Optional[str] = None) -> bool:
     """
     if raw is None:
         raw = os.environ.get("FORWARDED_ALLOW_IPS")
-    return any(
-        not ipaddress.ip_network(entry, strict=False).is_loopback
-        for entry in trusted_proxy_entries(raw)
-    )
+    return _names_a_proxy(trusted_proxy_entries(raw))
+
+
+def _names_a_proxy(entries: List[str]) -> bool:
+    return any(not ipaddress.ip_network(entry, strict=False).is_loopback for entry in entries)
 
 
 def build_uvicorn_config(app, *, host: str, port: int, proxy_headers: bool) -> uvicorn.Config:
@@ -102,15 +106,15 @@ def build_uvicorn_config(app, *, host: str, port: int, proxy_headers: bool) -> u
     """
     if not proxy_headers:
         return uvicorn.Config(app, host=host, port=port, proxy_headers=False)
-    raw = os.environ.get("FORWARDED_ALLOW_IPS")
-    trusted = ",".join(trusted_proxy_entries(raw))
+    entries = trusted_proxy_entries(os.environ.get("FORWARDED_ALLOW_IPS"))
+    trusted = ",".join(entries)
     # Built before logging: constructing the Config installs uvicorn's log
     # handlers, without which an INFO line here would go nowhere.
     config = uvicorn.Config(app, host=host, port=port, proxy_headers=True,
                             forwarded_allow_ips=trusted)
     _log.info("Proxy headers: trusting X-Forwarded-For from %s", trusted)
-    if raw is None or not raw.strip():
-        _log.warning(_UNSET_WARNING)
+    if not _names_a_proxy(entries):
+        _log.warning(_NO_PROXY_WARNING, trusted)
     return config
 
 

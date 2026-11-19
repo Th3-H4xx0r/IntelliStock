@@ -112,7 +112,8 @@ address. Uvicorn replaces that address with the real client from
 until it is set every client shares one address: anyone's ten wrong guesses
 lock the operator out of that username, and the per-IP limit stays off,
 because it would lock everyone out at once. The API logs a warning at startup
-while the variable is unset.
+(`FORWARDED_ALLOW_IPS names no reverse proxy`) while the variable names no
+proxy: unset, empty, or loopback only, which is the compose default.
 
 A request sent straight to the host-published port (8011) does not come from a
 listed address, so its `X-Forwarded-For` is ignored. `*`, `0.0.0.0/0`, `::/0`
