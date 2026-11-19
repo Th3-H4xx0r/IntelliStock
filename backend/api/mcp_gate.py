@@ -522,9 +522,12 @@ class McpGateMiddleware:
         # goes before the cost cap: a refused backtest spends no daily budget.
         refusal = await self._store_step(scope, started, principal, operation_id, audit_fields,
                                          mcp_caps.caps.check_rate, non_read=idempotent, cfg=cfg)
+        # A granted backtest slot is held until this call's route returns.
+        backtest_slot = False
         if refusal is None and operation_id in mcp_caps.BACKTEST_START_OPERATIONS:
             refusal = await self._store_step(scope, started, principal, operation_id, audit_fields,
                                              mcp_caps.caps.check_backtest_slot, cfg)
+            backtest_slot = refusal is None
         if refusal is None and policy.get("cost"):
             refusal = await self._store_step(scope, started, principal, operation_id, audit_fields,
                                              mcp_caps.caps.check_cost, cfg)
@@ -533,6 +536,8 @@ class McpGateMiddleware:
                 # re-seeds the count after a restart.
                 audit_fields["cap_bucket"] = "cost"
         if refusal is not None:
+            if backtest_slot:
+                mcp_caps.caps.release_backtest_slot()
             await self._capped(scope, receive, send, started, principal, operation_id, refusal,
                                **audit_fields)
             return
@@ -591,7 +596,13 @@ class McpGateMiddleware:
                     scope, receive, response.send)
             else:
                 scope[PRINCIPAL_SCOPE_KEY] = principal
-                await self.app(scope, _buffered_receive(body, receive), response.send)
+                try:
+                    await self.app(scope, _buffered_receive(body, receive), response.send)
+                finally:
+                    if backtest_slot:
+                        # The route has returned: a backtest it created is in
+                        # BacktestInstances now, where the count sees it.
+                        mcp_caps.caps.release_backtest_slot()
         except Exception:
             if idempotent:
                 await _release_key(idem_client, idempotency_key)

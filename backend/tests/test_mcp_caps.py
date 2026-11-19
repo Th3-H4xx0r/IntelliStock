@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 import pytest
+from fastapi import Body, HTTPException
 
 import apns_sender
 import mcp_approvals
@@ -31,7 +32,7 @@ from mcp_helpers import (
     IDEM, human_headers, make_probe_app, mcp_client, mcp_env, p256_keypair, public_client,
     seed_money_fixture, seed_operator, sign_decision, use_store,
 )
-from mcp_policy import McpConfig, iso_utc
+from mcp_policy import McpConfig, iso_utc, mcp_policy
 
 requires_pg = pytest.mark.skipif(not os.environ.get("PG_TEST_DSN"),
                                  reason="PG_TEST_DSN not set (run: ./scripts/dev_pg.sh up)")
@@ -396,13 +397,120 @@ def test_a_refused_backtest_spends_no_daily_cost(monkeypatch, probe, store):
 
 
 def test_backtest_slot_unit(monkeypatch):
-    caps = McpCaps(clock=Clock(LATE))
+    clk = Clock(LATE)
+    caps = McpCaps(clock=clk)
     monkeypatch.setattr(mcp_caps, "running_backtest_count", lambda: 1)
+    assert caps.check_backtest_slot(_cfg()) == CapRefusal(ONE_BACKTEST, 60)        # one already runs
+    assert caps.check_backtest_slot(_cfg(MCP_CAP_CONCURRENT_BACKTESTS="2")) is None  # a refusal held nothing
+    # A granted slot is held: the next start waits for release or the backstop.
+    assert caps.check_backtest_slot(_cfg(MCP_CAP_CONCURRENT_BACKTESTS="2")) == CapRefusal(ONE_BACKTEST, 60)
+    caps.release_backtest_slot()
     assert caps.check_backtest_slot(_cfg(MCP_CAP_CONCURRENT_BACKTESTS="2")) is None
-    assert caps.check_backtest_slot(_cfg()) == CapRefusal(ONE_BACKTEST, 60)
+    clk.advance(mcp_caps.BACKTEST_HOLD_S - 1)
+    assert caps.check_backtest_slot(_cfg(MCP_CAP_CONCURRENT_BACKTESTS="2")) == CapRefusal(ONE_BACKTEST, 60)
+    clk.advance(1)
+    assert caps.check_backtest_slot(_cfg(MCP_CAP_CONCURRENT_BACKTESTS="2")) is None
+    caps.release_backtest_slot()
     monkeypatch.setattr(mcp_caps, "running_backtest_count", lambda: 0)
-    assert caps.check_backtest_slot(_cfg()) is None
     assert caps.check_backtest_slot(_cfg(MCP_CAP_CONCURRENT_BACKTESTS="0")) == CapRefusal(ONE_BACKTEST, 60)
+    assert mcp_caps.BACKTEST_HOLD_S == 300
+
+
+def test_two_concurrent_backtest_starts_one_passes(probe):
+    """Neither start has a queue row yet (the count reads 0 throughout): the
+    slot is held from the grant until the first route returns."""
+    app, c, _ = probe
+    entered, finish = threading.Event(), threading.Event()
+    ran: list = []
+
+    @app.post("/probe/backtests/slow", operation_id="create_backtest",
+              openapi_extra=mcp_policy("write", cost=True))
+    def slow_backtest(body: dict = Body(default=None)):
+        ran.append(1)
+        entered.set()
+        finish.wait(10)
+        return {"id": 1}
+
+    first: dict = {}
+    worker = threading.Thread(target=lambda: first.setdefault(
+        "res", mcp_client(app).post("/probe/backtests/slow", json={}, headers=IDEM())))
+    worker.start()
+    try:
+        assert entered.wait(10)
+        second = c.post("/probe/backtests/slow", json={}, headers=IDEM())
+    finally:
+        finish.set()
+        worker.join(10)
+    _capped(second, ONE_BACKTEST, 60)
+    assert first["res"].status_code == 200 and len(ran) == 1
+
+
+def test_a_start_arriving_during_the_count_is_refused(monkeypatch):
+    caps = McpCaps(clock=Clock(LATE))
+    counting, finish = threading.Event(), threading.Event()
+
+    def slow_count() -> int:
+        counting.set()
+        finish.wait(10)
+        return 0
+
+    monkeypatch.setattr(mcp_caps, "running_backtest_count", slow_count)
+    out: dict = {}
+    worker = threading.Thread(target=lambda: out.setdefault("first", caps.check_backtest_slot(_cfg())))
+    worker.start()
+    try:
+        assert counting.wait(10)
+        second = caps.check_backtest_slot(_cfg())
+    finally:
+        finish.set()
+        worker.join(10)
+    assert second == CapRefusal(ONE_BACKTEST, 60) and out["first"] is None
+
+
+def test_the_slot_is_released_when_the_route_returns(monkeypatch, probe):
+    app, c, calls = probe
+
+    @app.post("/probe/backtests/bad", operation_id="create_backtest",
+              openapi_extra=mcp_policy("write", cost=True))
+    def bad_backtest(body: dict = Body(default=None)):
+        raise HTTPException(status_code=400, detail="bad dates")
+
+    @app.post("/probe/backtests/boom", operation_id="create_backtest",
+              openapi_extra=mcp_policy("write", cost=True))
+    def boom_backtest(body: dict = Body(default=None)):
+        raise RuntimeError("boom")
+
+    assert c.post("/probe/backtests", json={}, headers=IDEM()).status_code == 200
+    assert c.post("/probe/backtests/bad", json={}, headers=IDEM()).status_code == 400
+    assert mcp_client(app, raise_server_exceptions=False).post(
+        "/probe/backtests/boom", json={}, headers=IDEM()).status_code == 500
+    assert c.post("/probe/backtests", json={}, headers=IDEM()).status_code == 200
+    assert calls["count"]["create_backtest"] == 2
+    # Now the queue row of a created backtest is what refuses the next start.
+    monkeypatch.setattr(mcp_caps, "running_backtest_count", lambda: 1)
+    _capped(c.post("/probe/backtests", json={}, headers=IDEM()), ONE_BACKTEST)
+
+
+def test_a_later_refusal_releases_the_slot(monkeypatch, probe):
+    mcp_env(monkeypatch, MCP_CAP_COST_PER_DAY="0")
+    _, c, calls = probe
+    _capped(c.post("/probe/backtests", json={}, headers=IDEM()), COST)
+    mcp_env(monkeypatch, MCP_CAP_COST_PER_DAY="1")
+    assert c.post("/probe/backtests", json={}, headers=IDEM()).status_code == 200
+    assert calls["count"]["create_backtest"] == 1
+
+
+def test_running_backtest_count_counts_queue_rows_once(store, monkeypatch):
+    """A backtest is in BacktestInstances (the queue) from create until the
+    engine deletes the row, and in BacktestProgress once it runs."""
+    if os.environ.get("PG_TEST_DSN"):
+        pytest.skip("FakeStore only: the PG variant runs the real SQL")
+    monkeypatch.setattr(store, "sql", lambda query, params=(): [{"id": "901"}, {"id": "950"}])
+    store.insert("BacktestInstances", [
+        {"id": 901, "status": "running"}, {"id": 902, "status": "pending"},
+        {"id": 903, "status": "starting"}, {"id": 904, "status": "done"}, {"id": 905},
+    ])
+    assert running_backtest_count() == 4             # 901, 902, 903, 950
 
 
 def test_running_backtest_count_without_sql_raises():
@@ -422,6 +530,12 @@ def test_running_backtest_count_on_postgres(store):
                   (str(900 + n), '{"status": "%s"}' % status))
     store.sql('INSERT INTO "BacktestProgress" (id, payload) VALUES (%s, %s::jsonb)', ("999", "{}"))
     assert running_backtest_count() == 5
+    store.insert("BacktestInstances", [
+        {"id": 900, "status": "running"},           # also in BacktestProgress: counted once
+        {"id": 1001, "status": "pending"}, {"id": 1002, "status": "starting"},
+        {"id": 1003, "status": "done"}, {"id": 1004},
+    ])
+    assert running_backtest_count() == 7
 
 
 # -- what never touches a cap ----------------------------------------------------

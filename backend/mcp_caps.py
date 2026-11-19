@@ -8,7 +8,15 @@ so an agent retrying while a long backtest runs does not burn the day's
 cost-route budget. The daily approval-request cap is asked just before a call
 is held. A check that passes reserves its slot at once, under the one lock, so
 two concurrent calls cannot both take the last one; a refused check reserves
-nothing (the backtest slot never reserves: it only reads the running count).
+nothing.
+
+The backtest slot counts every backtest already started or queued, by the
+operator's standing rule of one backtest at a time: BacktestInstances (queue)
+rows exist from the moment create_backtest returns, BacktestProgress rows once
+the engine runs. Neither exists while a create is still in flight, so a granted
+slot is also held in memory until the gate releases it after the route
+returns (BACKTEST_HOLD_S is the backstop for a path that never releases), and
+two concurrent starts cannot both pass.
 
 The per-minute windows live in memory: the api is one process. The daily
 counts are global across MCP clients (Decision 18). Each is seeded at its first
@@ -41,6 +49,11 @@ _log = logging.getLogger("uvicorn.error")
 BACKTEST_START_OPERATIONS = frozenset({"create_backtest"})
 
 WINDOW_S = 60
+# The longest a granted backtest slot is held when nothing releases it.
+BACKTEST_HOLD_S = 300
+# BacktestInstances statuses of a backtest that is queued or running; the
+# engine deletes the row when the run ends.
+QUEUE_STATUSES = ("pending", "starting", "running")
 # How soon to retry when a backtest holds the slot, or a daily count could not be read.
 BACKTEST_RETRY_AFTER_S = 60
 SEED_RETRY_AFTER_S = 60
@@ -59,11 +72,14 @@ class CapRefusal:
 
 
 def running_backtest_count() -> int:
-    """BacktestProgress rows holding the backtest slot: running, queued, pending or paused*."""
-    rows = store.sql(
-        'SELECT count(*) AS n FROM "BacktestProgress" WHERE status IN (%s, %s, %s) OR status LIKE %s',
+    """Distinct backtests holding the slot: a BacktestProgress row running,
+    queued, pending or paused*, or a BacktestInstances row in QUEUE_STATUSES.
+    One backtest in both tables counts once."""
+    progress = store.sql(
+        'SELECT id FROM "BacktestProgress" WHERE status IN (%s, %s, %s) OR status LIKE %s',
         ("running", "queued", "pending", "paused%"))
-    return int(rows[0]["n"])
+    queued = store.pluck(store.filter("BacktestInstances", P.field("status").is_in(QUEUE_STATUSES)), "id")
+    return len({str(row["id"]) for row in progress} | {str(row["id"]) for row in queued})
 
 
 def _cost_calls_since(midnight_iso: str) -> int:
@@ -97,6 +113,7 @@ class McpCaps:
         self._calls: deque[float] = deque()
         self._writes: deque[float] = deque()
         self._daily: dict[str, tuple[datetime, int]] = {}
+        self._backtest_hold_until: float | None = None
 
     def check_rate(self, *, non_read: bool, cfg: McpConfig) -> CapRefusal | None:
         """The 60-second sliding windows: every call on the call window, a
@@ -125,8 +142,18 @@ class McpCaps:
         return self._check_daily("approvals", APPROVALS_LABEL, cfg.cap_approvals_per_day, _approvals_since)
 
     def check_backtest_slot(self, cfg: McpConfig) -> CapRefusal | None:
-        """A refusal while running_backtest_count() reaches the cap, or when it
-        cannot be read. Reserves nothing."""
+        """A refusal while another start holds the slot, while
+        running_backtest_count() reaches the cap, or when it cannot be read.
+
+        The hold is taken before the count (outside the lock), so a start that
+        arrives meanwhile is refused, and kept on success until
+        release_backtest_slot() or BACKTEST_HOLD_S.
+        """
+        now = self._clock()
+        with self._lock:
+            if self._backtest_hold_until is not None and now < self._backtest_hold_until:
+                return CapRefusal(BACKTEST_DETAIL, BACKTEST_RETRY_AFTER_S)
+            hold = self._backtest_hold_until = now + BACKTEST_HOLD_S
         try:
             running = running_backtest_count()
         except Exception as exc:
@@ -134,8 +161,17 @@ class McpCaps:
             _log.warning("mcp: running-backtest count failed (%s); refusing", type(exc).__name__)
             running = None
         if running is None or running >= cfg.cap_concurrent_backtests:
+            with self._lock:
+                if self._backtest_hold_until == hold:
+                    self._backtest_hold_until = None
             return CapRefusal(BACKTEST_DETAIL, BACKTEST_RETRY_AFTER_S)
         return None
+
+    def release_backtest_slot(self) -> None:
+        """End a granted slot's hold: the start's route has returned, so a
+        backtest it created is now in BacktestInstances for the count to see."""
+        with self._lock:
+            self._backtest_hold_until = None
 
     def _check_daily(self, bucket: str, label: str, cap: int,
                      count_since: Callable[[str], int]) -> CapRefusal | None:
