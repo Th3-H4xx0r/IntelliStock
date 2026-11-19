@@ -163,6 +163,18 @@ def login_second_factor_html(txn_id: str, username: str, *, error: Optional[str]
     )
 
 
+def enroll_start_html(token: str, username: str) -> str:
+    """An unopened link's page: its button POSTs the token to /enroll/open, so a GET never spends the link."""
+    return (
+        '<p class="muted">Set up sign-in for <strong>' + escape(username) + "</strong>: your IntelliStock password, "
+        + "then a passkey and an authenticator app. This link works once.</p>\n"
+        + '<form method="post" action="/enroll/open">\n'
+        + '<input type="hidden" name="t" value="' + escape(token) + '">\n'
+        + '<button type="submit">Start enrollment</button>\n'
+        + "</form>"
+    )
+
+
 def enroll_password_html(username: str, *, error: Optional[str] = None) -> str:
     """The enrollment's password form; the username is the one the admin CLI enrolled, shown read-only."""
     return (

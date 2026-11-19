@@ -134,7 +134,7 @@ def _origin(settings):
 
 
 def _query(url):
-    return {key: values[0] for key, values in parse_qs(urlsplit(url).query).items()}
+    return {key: values[0] for key, values in parse_qs(urlsplit(url).query, keep_blank_values=True).items()}
 
 
 def _link(deps, username="operator"):
@@ -150,8 +150,15 @@ def _row(db, path):
     return db.query_one("SELECT * FROM enrollments WHERE token_hash = ?", (hash_token(token),))
 
 
-async def _open(http, path):
-    response = await http.get(path)
+async def _open(http, settings, path):
+    """The link's Start page, then its button: the POST /enroll/open response, a 303 to /enroll."""
+    page = await http.get(path)
+    assert page.status_code == 200, page.text
+    assert "set-cookie" not in page.headers
+    assert '<form method="post" action="/enroll/open">' in page.text and "Start enrollment" in page.text
+    token = re.search(r'<input type="hidden" name="t" value="([^"]+)">', page.text).group(1)
+    assert token == _query(path)["t"]
+    response = await http.post("/enroll/open", data={"t": token}, headers=_origin(settings))
     assert response.status_code == 303, response.text
     assert response.headers["location"] == "/enroll"
     return response
@@ -195,7 +202,7 @@ async def _show_secret(http):
 async def _to_passkey(http, deps, path=None):
     """A link opened in this browser and its password step passed: the link's path."""
     path = path or _link(deps)
-    await _open(http, path)
+    await _open(http, deps.settings, path)
     response = await _password(http, deps.settings)
     assert response.status_code == 303, response.text
     assert response.headers["location"] == "/enroll"
@@ -321,7 +328,7 @@ class _SlowPasswords:
 
 async def test_full_enrollment_then_login_works(browser, deps, settings, device, clock, db):
     path = _link(deps)
-    opened = await _open(browser, path)
+    opened = await _open(browser, settings, path)
     assert COOKIE.fullmatch(opened.headers["set-cookie"])
     row = _row(db, path)
     assert (row["opened_at"], row["stage"]) == (clock(), "password")
@@ -386,45 +393,68 @@ async def test_full_enrollment_then_login_works(browser, deps, settings, device,
     assert (await _sign_in(browser, settings, code=_code(secret, clock))).status_code == 200
 
 
+async def _press_start(http, settings, path):
+    """The Start button's POST for a link, without first loading its page."""
+    return await http.post("/enroll/open", data={"t": _query(path)["t"]}, headers=_origin(settings))
+
+
 async def test_link_single_use(app, browser, deps, settings, device):
     path = _link(deps)
-    assert (await browser.head(path)).status_code == 405  # a HEAD (a link preview) spends nothing
-    await _open(browser, path)
+    assert (await browser.head(path)).status_code == 405
+    await _open(browser, settings, path)
     async with _browser(app, settings) as other:
-        again = await other.get(path)
-        assert again.status_code == 400
-        assert LINK_USED in again.text
-        assert "set-cookie" not in again.headers
+        for again in (await other.get(path), await _press_start(other, settings, path)):
+            assert again.status_code == 400
+            assert LINK_USED in again.text
+            assert "set-cookie" not in again.headers
         assert (await other.get("/enroll")).status_code == 400
-    # The browser that opened it, following the link again, is sent back to its enrollment and not rebound.
-    back = await browser.get(path)
-    assert (back.status_code, back.headers["location"]) == (303, "/enroll")
-    assert "set-cookie" not in back.headers
+    # The browser that opened it, following the link or pressing Start again, is sent back and not rebound.
+    for back in (await browser.get(path), await _press_start(browser, settings, path)):
+        assert (back.status_code, back.headers["location"]) == (303, "/enroll")
+        assert "set-cookie" not in back.headers
 
     await _password(browser, settings)
     await _register(browser, settings, device)
     response = await _send_code(browser, settings, _code(await _show_secret(browser), deps.clock))
     assert DONE in response.text
-    done = await browser.get(path)
-    assert (done.status_code, LINK_USED in done.text) == (400, True)
+    for done in (await browser.get(path), await _press_start(browser, settings, path)):
+        assert (done.status_code, LINK_USED in done.text) == (400, True)
     for bad in ("/enroll?t=", "/enroll?t=mcpen_unknown", "/enroll?t=not-a-token"):
-        response = await browser.get(bad)
-        assert (response.status_code, LINK_USED in response.text) == (400, True), bad
-        assert "set-cookie" not in response.headers
+        for response in (await browser.get(bad), await _press_start(browser, settings, bad)):
+            assert (response.status_code, LINK_USED in response.text) == (400, True), bad
+            assert "set-cookie" not in response.headers
+    no_token = await browser.post("/enroll/open", data={}, headers=_origin(settings))
+    assert (no_token.status_code, LINK_USED in no_token.text) == (400, True)
+
+
+async def test_link_preview_leaves_it_unused(app, browser, deps, settings, db):
+    path = _link(deps)
+    async with _browser(app, settings) as preview:  # a link preview, say iMessage on a tailnet Mac
+        for _ in range(2):
+            page = await preview.get(path)
+            assert page.status_code == 200
+            assert "Start enrollment" in page.text and "operator" in page.text
+            assert "set-cookie" not in page.headers
+    row = _row(db, path)
+    assert (row["opened_at"], row["cookie_hash"]) == (None, None)
+    await _open(browser, settings, path)  # the operator's browser still opens it
+    assert _row(db, path)["opened_at"] is not None
 
 
 async def test_link_expires_after_600s(browser, deps, settings, clock, db):
     path = _link(deps)
-    clock.advance(ENROLL_TTL_S)
-    response = await browser.get(path)
-    assert response.status_code == 400
-    assert LINK_USED in response.text
-    assert "set-cookie" not in response.headers
+    clock.advance(ENROLL_TTL_S - 1)
+    assert (await browser.get(path)).status_code == 200  # the Start page at 599 s ...
+    clock.advance(1)
+    for response in (await browser.get(path), await _press_start(browser, settings, path)):  # ... gone at 600 s
+        assert response.status_code == 400
+        assert LINK_USED in response.text
+        assert "set-cookie" not in response.headers
     assert _row(db, path)["opened_at"] is None
 
     # Opened in time, the enrollment still ends 600 s after the link was made: the password passes at 599 s ...
     path = _link(deps)
-    await _open(browser, path)
+    await _open(browser, settings, path)
     clock.advance(ENROLL_TTL_S - 1)
     assert (await _password(browser, settings)).status_code == 303
     clock.advance(1)
@@ -438,11 +468,12 @@ async def test_link_expires_after_600s(browser, deps, settings, clock, db):
 
 async def test_other_browser_cookie_rejected(app, browser, deps, settings, device, fake, db):
     path = _link(deps)
-    await _open(browser, path)
+    await _open(browser, settings, path)
     forged = {**_origin(settings), "Cookie": "mcp_enroll=mcpec_" + secrets.token_urlsafe(32)}
     async with _browser(app, settings) as other:
         page = await other.get("/enroll")
         assert (page.status_code, NOT_OPEN in page.text) == (400, True)
+        assert "Paste your enrollment link into the address bar." in page.text
         for headers in (None, forged):
             response = await _password(other, settings, headers=headers)
             assert response.status_code == 400
@@ -468,7 +499,12 @@ async def test_foreign_or_missing_origin_rejected(browser, deps, settings, devic
     foreign = [{"Origin": "https://evil.test"}, {}, {"Origin": "null"}, {"Origin": settings.public_origin + "/"},
                {"Origin": "http://s7.tail.ts.net:8443"}]
     path = _link(deps)
-    await _open(browser, path)
+    for headers in foreign:
+        response = await browser.post("/enroll/open", data={"t": _query(path)["t"]}, headers=headers)
+        assert (response.status_code, FOREIGN_ORIGIN in response.text) == (403, True), headers
+        assert "set-cookie" not in response.headers
+    assert _row(db, path)["opened_at"] is None
+    await _open(browser, settings, path)
     for headers in foreign:
         response = await _password(browser, settings, headers=headers)
         assert (response.status_code, FOREIGN_ORIGIN in response.text) == (403, True), headers
@@ -493,7 +529,7 @@ async def test_foreign_or_missing_origin_rejected(browser, deps, settings, devic
 
 async def test_wrong_password_does_not_advance(browser, deps, settings, fake, db):
     path = _link(deps)
-    await _open(browser, path)
+    await _open(browser, settings, path)
     response = await _password(browser, settings, password="wrong horse")
     assert response.status_code == 401
     assert WRONG_PASSWORD in response.text
@@ -514,7 +550,7 @@ async def test_concurrent_password_guesses_stop_at_lockout(browser, deps, settin
     slow = _SlowPasswords(fake.users)
     fake.set_route("POST", VERIFY_PASSWORD_PATH, 0, slow)
     path = _link(deps)
-    await _open(browser, path)
+    await _open(browser, settings, path)
     responses = await asyncio.gather(*(_password(browser, settings, password="guess") for _ in range(12)))
     assert sorted(response.status_code for response in responses) == [401] * 5 + [429] * 7
     assert (len(slow.calls), slow.max_in_flight) == (5, 1)
@@ -531,7 +567,7 @@ async def test_concurrent_password_guesses_stop_at_lockout(browser, deps, settin
 
 async def test_api_outage_or_throttle_counts_nothing(browser, deps, settings, fake, db):
     path = _link(deps)
-    await _open(browser, path)
+    await _open(browser, settings, path)
     fake.set_route("POST", VERIFY_PASSWORD_PATH, 500, {"detail": "boom"})
     response = await _password(browser, settings)
     assert response.status_code == 503
@@ -641,7 +677,7 @@ async def test_uv_false_registration_rejected(browser, deps, settings, device, d
 
 async def test_steps_out_of_order_rejected(browser, deps, settings, device, fake, db):
     path = _link(deps)
-    await _open(browser, path)
+    await _open(browser, settings, path)
     options = await _options(browser, settings)
     assert (options.status_code, options.json()) == (400, {"error": WRONG_STEP})
     assert (await _send_registration(browser, settings, {})).status_code == 400
@@ -693,7 +729,9 @@ async def test_newer_enrollment_replaces_older(browser, deps, settings, device, 
 
 async def test_security_headers_on_enroll_pages(browser, deps, settings, device, clock):
     path = _link(deps)
-    responses = {"open": await browser.get(path)}
+    responses = {"link_page": await browser.get(path)}
+    responses["open"] = await _press_start(browser, settings, path)
+    assert COOKIE.fullmatch(responses["open"].headers["set-cookie"])
     responses["password_page"] = await browser.get("/enroll")
     responses["wrong_password"] = await _password(browser, settings, password="guess")
     responses["foreign"] = await _password(browser, settings, headers={"Origin": "https://evil.test"})
@@ -708,13 +746,13 @@ async def test_security_headers_on_enroll_pages(browser, deps, settings, device,
     responses["done"] = await _send_code(browser, settings, _code(secret, clock))
     responses["used_link"] = await browser.get(path)
     assert {name: response.status_code for name, response in responses.items()} == {
-        "open": 303, "password_page": 200, "wrong_password": 401, "foreign": 403, "password": 303,
+        "link_page": 200, "open": 303, "password_page": 200, "wrong_password": 401, "foreign": 403, "password": 303,
         "passkey_page": 200, "options": 200, "registered": 200, "totp_page": 200, "shown_again": 200,
         "wrong_code": 401, "done": 200, "used_link": 400}
     for name, response in responses.items():
         assert {header: response.headers.get(header) for header in PAGE_HEADERS} == PAGE_HEADERS, name
 
-    for name in ("password_page", "wrong_password", "foreign", "passkey_page", "totp_page", "shown_again",
+    for name in ("link_page", "password_page", "wrong_password", "foreign", "passkey_page", "totp_page", "shown_again",
                  "wrong_code", "done", "used_link"):
         page = responses[name].text
         assert responses[name].headers["content-type"] == "text/html; charset=utf-8", name
@@ -729,7 +767,11 @@ async def test_security_headers_on_enroll_pages(browser, deps, settings, device,
 
 async def test_username_is_escaped(browser, deps, settings):
     name = '"><script>alert(1)</script>'
-    await _open(browser, _link(deps, name))
+    path = _link(deps, name)
+    start = await browser.get(path)
+    assert "<script>alert(1)</script>" not in start.text
+    assert "<strong>&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;</strong>" in start.text
+    await _open(browser, settings, path)
     page = await browser.get("/enroll")
     assert page.status_code == 200
     assert "<script>alert(1)</script>" not in page.text

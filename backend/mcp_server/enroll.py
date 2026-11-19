@@ -4,11 +4,17 @@
 password, keeping only the link token's hash. These pages move that row through
 a stage machine, and nothing reaches users or passkeys before the last step:
 
-1. GET /enroll?t= opens the link. A token that is unexpired and never opened
-   sets opened_at, binds the row to this browser with the mcp_enroll cookie, and
-   answers 303 to /enroll, so the token leaves the address bar. Any other token
-   gets 400. The one exception is the browser the row is already bound to, which
-   is sent back to /enroll (the operator clicked the link twice).
+1. GET /enroll?t= only reads. An unexpired link nobody has opened gets a page
+   whose "Start enrollment" button POSTs the token to /enroll/open; that POST
+   (this server's Origin required) sets opened_at, binds the row to this
+   browser with the mcp_enroll cookie, and answers 303 to /enroll, so the token
+   leaves the address bar. A used, expired or unknown link gets 400, except in
+   the browser the row is already bound to, which is sent back to /enroll (the
+   operator clicked the link twice). Because a GET changes nothing, a link
+   preview (iMessage, Slack) cannot spend the link. Because the cookie is set
+   by a same-origin POST, the redirect after it is same-site and carries the
+   SameSite=Strict cookie, even when the link itself was clicked on another
+   site.
 2. password: POST /enroll/password checks the row's username and the typed
    password with the API. The username's lockout is checked first, as on the
    sign-in page, and a wrong password counts against it in LoginThrottle (kind
@@ -66,6 +72,7 @@ from mcp_server.pages import (
     cookie_matches,
     enroll_passkey_html,
     enroll_password_html,
+    enroll_start_html,
     enroll_totp_html,
     message_html,
     origin_allowed,
@@ -85,7 +92,8 @@ PASSKEY_TITLE = "Add a passkey"
 TOTP_TITLE = "Add an authenticator app"
 
 LINK_USED = "This enrollment link was already used or has expired."
-NOT_OPEN = "No enrollment is open in this browser. Start a new enrollment with the admin CLI."
+NOT_OPEN = ("No enrollment is open in this browser. Paste your enrollment link into the address bar. "
+            "If the link was already used, start a new enrollment with the admin CLI.")
 EXPIRED = "This enrollment has expired. Start a new enrollment with the admin CLI."
 WRONG_STEP = "This enrollment step is not available now. Go back and reload the page."
 FOREIGN_ORIGIN = "This request did not come from the enrollment page."
@@ -154,11 +162,11 @@ class _EnrollPages:
     # --- Endpoints -----------------------------------------------------------------------------
 
     async def page(self, request: Request) -> Response:
-        """GET /enroll?t= opens a link; GET /enroll shows the current step."""
-        if request.method != "GET":  # a HEAD, such as a link preview, must not open a link or spend the QR code
+        """GET /enroll?t= shows a link's Start page; GET /enroll shows the current step."""
+        if request.method != "GET":  # a HEAD must not spend the QR code's one showing
             return Response(status_code=405, headers={"Allow": "GET", **security_headers(self._settings)})
         if "t" in request.query_params:
-            return self._open_link(request, request.query_params["t"])
+            return self._link_page(request, request.query_params["t"])
         try:
             row = self._enrollment(request)
         except _Refused as refused:
@@ -168,6 +176,29 @@ class _EnrollPages:
         if row["stage"] == "passkey":
             return self._page(PASSKEY_TITLE, enroll_passkey_html())
         return self._totp_page(row)
+
+    async def open_link(self, request: Request) -> Response:
+        """POST /enroll/open (t): bind the link's row to this browser and send it to /enroll."""
+        if not origin_allowed(request, self._settings):
+            return self._error_page(403, FOREIGN_ORIGIN)
+        form = await request.form()
+        token = _field(form, "t")
+        if not token.startswith(ENROLL_TOKEN_PREFIX):
+            return self._error_page(400, LINK_USED)
+        cookie = new_token(ENROLL_COOKIE_PREFIX)
+        with self._deps.db.tx() as conn:
+            now = self._deps.clock()
+            opened = conn.execute(
+                f"UPDATE enrollments SET opened_at = ?, cookie_hash = ? WHERE token_hash = ? AND opened_at IS NULL "
+                f"AND {_LIVE}",
+                (now, hash_token(cookie), hash_token(token), now),
+            ).rowcount
+        if opened != 1:
+            return self._used_link(request, self._link_row(token))
+        response = self._redirect(ENROLL_PATH)
+        response.headers.append("set-cookie", cookie_header(ENROLL_COOKIE, cookie, path=ENROLL_PATH,
+                                                            max_age=ENROLL_TTL_S))
+        return response
 
     async def password(self, request: Request) -> Response:
         """POST /enroll/password (password)."""
@@ -252,30 +283,31 @@ class _EnrollPages:
 
     # --- Steps -----------------------------------------------------------------------------------
 
-    def _open_link(self, request: Request, token: str) -> Response:
-        """Bind the link's row to this browser and send it to /enroll; 400 for a used, expired or unknown link."""
+    def _link_row(self, token: str) -> Optional[sqlite3.Row]:
+        """The row behind a link token, live or not; None for an unknown or malformed token."""
         if not token.startswith(ENROLL_TOKEN_PREFIX):
-            return self._error_page(400, LINK_USED)
-        token_hash = hash_token(token)
-        cookie = new_token(ENROLL_COOKIE_PREFIX)
-        with self._deps.db.tx() as conn:
-            now = self._deps.clock()
-            opened = conn.execute(
-                f"UPDATE enrollments SET opened_at = ?, cookie_hash = ? WHERE token_hash = ? AND opened_at IS NULL "
-                f"AND {_LIVE}",
-                (now, hash_token(cookie), token_hash, now),
-            ).rowcount
-            row = conn.execute(f"SELECT {_COLUMNS} FROM enrollments WHERE token_hash = ?", (token_hash,)).fetchone()
-        if opened == 1:
-            response = self._redirect(ENROLL_PATH)
-            response.headers.append("set-cookie", cookie_header(ENROLL_COOKIE, cookie, path=ENROLL_PATH,
-                                                                max_age=ENROLL_TTL_S))
-            return response
+            return None
+        return self._deps.db.query_one(f"SELECT {_COLUMNS} FROM enrollments WHERE token_hash = ?",
+                                       (hash_token(token),))
+
+    def _link_page(self, request: Request, token: str) -> Response:
+        """GET /enroll?t=, which changes nothing: the Start page for a live link nobody has opened."""
+        row = self._link_row(token)
         try:
-            _require_live(row, now)
+            _require_live(row, self._deps.clock())
         except _Refused:
             return self._error_page(400, LINK_USED)
-        if cookie_matches(request, ENROLL_COOKIE, row["cookie_hash"]):
+        if row["opened_at"] is None:
+            return self._page(ENROLL_TITLE, enroll_start_html(token, row["username"]))
+        return self._used_link(request, row)
+
+    def _used_link(self, request: Request, row: Optional[sqlite3.Row]) -> Response:
+        """A link that is not open for the taking: back to /enroll in its bound browser, else 400."""
+        try:
+            _require_live(row, self._deps.clock())
+        except _Refused:
+            return self._error_page(400, LINK_USED)
+        if row["opened_at"] is not None and cookie_matches(request, ENROLL_COOKIE, row["cookie_hash"]):
             return self._redirect(ENROLL_PATH)
         return self._error_page(400, LINK_USED)
 
@@ -423,10 +455,11 @@ def _limited(endpoint: Callable[[Request], Awaitable[Response]]) -> ASGIApp:
 
 
 def enroll_routes(deps: WebDeps) -> List[Route]:
-    """GET /enroll, POST /enroll/password, /enroll/passkey/options, /enroll/passkey and /enroll/totp."""
+    """GET /enroll; POST /enroll/open, /enroll/password, /enroll/passkey/options, /enroll/passkey, /enroll/totp."""
     pages = _EnrollPages(deps)
     return [
         Route(ENROLL_PATH, endpoint=_limited(pages.page), methods=["GET"]),
+        Route("/enroll/open", endpoint=_limited(pages.open_link), methods=["POST"]),
         Route("/enroll/password", endpoint=_limited(pages.password), methods=["POST"]),
         Route("/enroll/passkey/options", endpoint=_limited(pages.passkey_options), methods=["POST"]),
         Route("/enroll/passkey", endpoint=_limited(pages.passkey), methods=["POST"]),
