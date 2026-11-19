@@ -74,6 +74,11 @@ nonisolated enum Route: Hashable, Sendable {
     case notificationSettings
     /// Settings › Jarvis approvals.
     case approvalDevices
+    /// More › Approvals: Jarvis's requests that wait for the operator, and
+    /// the recent ones.
+    case approvals
+    /// One of Jarvis's requests, by approval id: `/approvals/ap_7f3c`.
+    case approval(String)
     /// `/connect` pushed from Settings to change the server URL.
     case connect
     /// `/onboarding` pushed from the dashboard's onboarding panel.
@@ -99,6 +104,7 @@ nonisolated enum Route: Hashable, Sendable {
             case "analysis": self = .analysis(nil)
             case "models": self = .models
             case "token-usage": self = .tokenUsage
+            case "approvals": self = .approvals
             case "settings": self = .settings
             case "connect": self = .connect
             case "onboarding": self = .onboarding
@@ -112,6 +118,7 @@ nonisolated enum Route: Hashable, Sendable {
             case "strategies": self = .strategy(id)
             case "stock": self = .stock(StockRoute(symbol: id))
             case "analysis": self = .analysis(id)
+            case "approvals": self = .approval(id)
             case "settings" where id == "notifications": self = .notificationSettings
             case "settings" where id == "approval-devices": self = .approvalDevices
             default: return nil
