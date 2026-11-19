@@ -7,10 +7,12 @@ that username; twenty failures across all usernames inside 10 minutes lock
 everyone, which catches a guesser who spreads attempts over many names.
 
 A user lockout's level is the previous level + 1 when that username's previous
-lockout was set within the last 24 h (inclusive), else 1, and it lasts
+lockout is still running or ended no more than 24 h ago, else 1, and it lasts
 min(base * 2 ** (level - 1), max): 900 s, 1800 s, 3600 s ... capped at 86,400 s.
-The cap equals that 24 h memory, so a guesser who resumes the moment a capped
-lockout ends stays capped. The global lockout is a fixed 600 s and never
+The 24 h memory runs from the end of the previous lockout, not its start, so a
+guesser who waits out a capped lockout and resumes stays capped; only a full quiet
+day after a lockout ends brings the next one back to 900 s. The global lockout is
+a fixed 600 s and never
 escalates: it locks the operator out too, so a longer one would only hand a
 guesser a longer denial of service.
 
@@ -96,11 +98,11 @@ class LoginThrottle:
             conn.execute("DELETE FROM login_failures WHERE username = ?", (normalize_username(username),))
 
     def purge(self) -> None:
-        """Delete failures older than a day, and lockouts that have ended and no longer raise the next level."""
+        """Delete failures older than a day, and lockouts that ended over a day ago (they no longer raise a level)."""
         with self._db.tx() as conn:
             now = self._clock()
             conn.execute("DELETE FROM login_failures WHERE at < ?", (now - FAILURE_RETENTION_S,))
-            conn.execute("DELETE FROM lockouts WHERE until <= ? AND set_at < ?", (now, now - LEVEL_MEMORY_S))
+            conn.execute("DELETE FROM lockouts WHERE until < ?", (now - LEVEL_MEMORY_S,))
 
     def _user_lockout_s(self, level: int) -> int:
         return min(self._base_lockout_s * 2 ** (level - 1), self._max_lockout_s)
@@ -108,13 +110,14 @@ class LoginThrottle:
     def _maybe_lock(self, conn: sqlite3.Connection, now: float, scope: str, where: str, params: tuple,
                     window_s: int, limit: int, duration: Callable[[int], int]) -> Optional[int]:
         """Lock scope if limit failures matching where (a fixed clause, never caller text) fall in its window."""
-        prev = conn.execute("SELECT level, set_at FROM lockouts WHERE scope = ?", (scope,)).fetchone()
+        prev = conn.execute("SELECT level, set_at, until FROM lockouts WHERE scope = ?", (scope,)).fetchone()
         since = now - window_s if prev is None else max(now - window_s, prev["set_at"])
         count = conn.execute(f"SELECT COUNT(*) FROM login_failures WHERE at > ?{where}",
                              (since,) + params).fetchone()[0]
         if count < limit:
             return None
-        level = prev["level"] + 1 if prev is not None and now - prev["set_at"] <= LEVEL_MEMORY_S else 1
+        # Remembered from the previous lockout's end (negative while it still runs), so the cap holds.
+        level = prev["level"] + 1 if prev is not None and now - prev["until"] <= LEVEL_MEMORY_S else 1
         seconds = duration(level)
         conn.execute(
             "INSERT INTO lockouts (scope, until, level, set_at) VALUES (?, ?, ?, ?) "

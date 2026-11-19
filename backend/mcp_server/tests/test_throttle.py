@@ -62,22 +62,37 @@ def test_five_failures_lock_user_for_900s(throttle, clock, lockouts):
 
 
 def test_lockout_escalates_doubling_capped_86400(throttle, clock, lockouts):
-    expected = [900, 1800, 3600, 7200, 14400, 28800, 57600, 86400, 86400]
-    for seconds in expected:
-        assert _fail(throttle, "operator", 5) == [None, None, None, None, seconds]
+    # A month of real timing: the guesser waits each lockout out, comes back three minutes after it
+    # ends and spaces five guesses 20 s apart. The level climbs to the cap and then stays there.
+    seen = []
+    while clock() < START + 30 * DAY:
+        for _ in range(4):
+            assert throttle.record_failure("operator", "password") is None
+            clock.advance(20)
+        seconds = throttle.record_failure("operator", "password")
         assert throttle.check("operator") == seconds
-        clock.advance(seconds)  # wait the lockout out, then fail again at once
-        assert throttle.check("operator") is None
-    # The 9th lockout is set exactly 24 h after the 8th: still remembered, so it stays capped.
-    assert lockouts == [("user", "operator", seconds) for seconds in expected]
+        seen.append(seconds)
+        clock.advance(seconds + 180)
+    assert seen[:8] == [900, 1800, 3600, 7200, 14400, 28800, 57600, 86400]
+    assert seen[8:] == [86400] * (len(seen) - 8)
+    assert len(seen) == 36  # 180 guesses in 30 days
+    assert lockouts == [("user", "operator", seconds) for seconds in seen]
 
 
-def test_level_resets_after_24h_without_a_lockout(throttle, clock):
+def test_level_memory_runs_from_the_end_of_the_last_lockout(throttle, clock):
     assert _fail(throttle, "operator", 5)[-1] == 900
-    clock.advance(900)
+    clock.advance(900 + DAY - 60)  # quiet for just under 24 h after it ended: remembered
     assert _fail(throttle, "operator", 5)[-1] == 1800
-    clock.advance(DAY + 1)  # more than 24 h since the last lockout was set
+    clock.advance(1800 + DAY + 60)  # quiet for just over 24 h after it ended: forgotten
     assert _fail(throttle, "operator", 5)[-1] == 900
+
+
+def test_failures_during_a_lockout_escalate_it(throttle, clock, lockouts):
+    # The second-factor page records failures without checking first, so they can land mid-lockout.
+    assert _fail(throttle, "operator", 5)[-1] == 900
+    clock.advance(100)
+    assert _fail(throttle, "operator", 5)[-1] == 1800
+    assert throttle.check("operator") == 1800
 
 
 def test_failures_before_a_lockout_do_not_count_again(db, clock, lockouts):
@@ -184,12 +199,12 @@ def test_purge_drops_day_old_failures(throttle, db, clock):
 def test_purge_keeps_lockouts_that_still_matter(db, clock, lockouts):
     throttle = _throttle(db, clock, lockouts)
     _fail(throttle, "operator", 5)
-    clock.advance(DAY - 1)
-    throttle.purge()  # ended, but still raises the next level
+    clock.advance(900 + DAY - 1)
+    throttle.purge()  # ended just under a day ago: still raises the next level
     assert _rows(db, "lockouts") == 1
     assert _fail(throttle, "operator", 5)[-1] == 1800
-    clock.advance(DAY + 1)
-    throttle.purge()  # ended and forgotten
+    clock.advance(1800 + DAY + 1)
+    throttle.purge()  # ended over a day ago: forgotten
     assert _rows(db, "lockouts") == 0
     # A lockout longer than a day is kept while it runs, however old it is.
     long_throttle = _throttle(db, clock, lockouts, base_lockout_s=2 * DAY, max_lockout_s=2 * DAY)
