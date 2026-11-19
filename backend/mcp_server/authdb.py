@@ -127,6 +127,7 @@ _DDL = (
         event TEXT,
         detail TEXT,
         delivered_at REAL,
+        dead_at REAL,
         attempts INTEGER NOT NULL DEFAULT 0
     )""",
     """CREATE TABLE IF NOT EXISTS server_state (

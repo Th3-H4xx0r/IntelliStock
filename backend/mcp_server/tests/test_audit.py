@@ -51,9 +51,21 @@ def _rows(db):
     return [dict(row) for row in db.query("SELECT * FROM auth_events ORDER BY id")]
 
 
-def _alert_lines(caplog):
+def _warning_lines(caplog):
     return [record.getMessage() for record in caplog.records
             if record.name == "mcp_server.audit" and record.levelno == logging.WARNING]
+
+
+def _reject_poison(fake, status):
+    """Answer status to every event whose detail username is "poison"; accept the rest as the real API does."""
+    def handler(request):
+        body = json.loads(request.content)
+        if body["detail"].get("username") == "poison":
+            return httpx.Response(status, json={"detail": "rejected"})
+        fake.audit_events.append(body)
+        return httpx.Response(204)
+
+    fake.set_route("POST", AUDIT_EVENT_PATH, 0, handler)
 
 
 def test_event_sets_match_the_contract():
@@ -96,6 +108,36 @@ def test_forbidden_substrings_matched_in_any_case_and_nested(sink, db):
         assert secret not in row["detail"]
 
 
+def test_long_strings_truncated_to_256_chars(sink, db, caplog):
+    # The login form's username reaches login_failed as typed.
+    sink.record("login_failed", username="x" * 5000, reason="password", kept="z" * 256,
+                extra={"notes": ["y" * 300, "short"], "count": 3})
+    sink.record("lockout", scope="user", username="q" * 5000, seconds=60)
+
+    first, second = (json.loads(row["detail"]) for row in _rows(db))
+    assert first == {"username": "x" * 255 + "\u2026", "reason": "password", "kept": "z" * 256,
+                     "extra": {"notes": ["y" * 255 + "\u2026", "short"], "count": 3}}
+    assert len(first["username"]) == 256
+    assert second["username"] == "q" * 255 + "\u2026"
+    # The alert log line carries the bounded detail too.
+    assert "q" * 255 in caplog.text and "q" * 256 not in caplog.text
+
+
+def test_oversized_detail_replaced_by_marker(sink, db, caplog):
+    near_cap = {f"k{i:02d}": "v" * 200 for i in range(35)}  # about 7.6 KB serialized
+    sink.record("login_failed", username="op", **near_cap)
+    sink.record("lockout", scope="user", username="op", seconds=60,
+                **{f"k{i:02d}": "v" * 200 for i in range(60)})  # about 13 KB serialized
+
+    kept, cut = _rows(db)
+    assert json.loads(kept["detail"]) == {"username": "op", **near_cap}
+    assert len(kept["detail"].encode("utf-8")) <= 8192
+    marker = json.loads(cut["detail"])
+    assert set(marker) == {"truncated", "detail_bytes"}
+    assert marker["truncated"] is True and marker["detail_bytes"] > 8192
+    assert _warning_lines(caplog) == ["mcp auth alert: lockout " + cut["detail"]]
+
+
 async def test_flush_delivers_and_marks(sink, db, fake, clock):
     sink.record("login_ok", username="operator", method="passkey", tailnet_user="op@example.com")
     clock.advance(3)
@@ -120,7 +162,19 @@ def _failing_connect(request):
     raise httpx.ConnectError("connection refused", request=request)
 
 
-@pytest.mark.parametrize("failure", [_failing_503, _failing_connect], ids=["503", "connect-error"])
+def _failing_with(status):
+    def answer(request):
+        return httpx.Response(status, json={"detail": "not now"})
+    return answer
+
+
+# 401 (MCP disabled or a token mismatch), 403, 404/405 (route not deployed yet), 408 and 429
+# fail every row alike: they are retried, never treated as a rejection of the row.
+@pytest.mark.parametrize(
+    "failure",
+    [_failing_503, _failing_connect] + [_failing_with(status) for status in (401, 403, 404, 405, 408, 429)],
+    ids=["503", "connect-error", "401", "403", "404", "405", "408", "429"],
+)
 async def test_flush_retries_after_api_failure(sink, db, fake, clock, failure):
     delivered = []
 
@@ -135,7 +189,7 @@ async def test_flush_retries_after_api_failure(sink, db, fake, clock, failure):
 
     assert await sink.flush() == 0
     (row,) = _rows(db)
-    assert (row["delivered_at"], row["attempts"]) == (None, 1)
+    assert (row["delivered_at"], row["dead_at"], row["attempts"]) == (None, None, 1)
 
     clock.advance(5)
     assert await sink.flush() == 1
@@ -156,6 +210,37 @@ async def test_flush_stops_at_first_failure(sink, db, fake):
     # costs a flush (or the admin CLI) a single timeout.
     assert len(fake.requests) == 1
     assert [(row["delivered_at"], row["attempts"]) for row in _rows(db)] == [(None, 1), (None, 0)]
+
+
+@pytest.mark.parametrize("status", [400, 413, 422])
+async def test_rejected_row_does_not_block_later_rows(sink, db, fake, clock, caplog, status):
+    _reject_poison(fake, status)
+    sink.record("login_failed", username="poison", reason="password")
+    for n in range(3):
+        sink.record("login_ok", username=f"op{n}")
+
+    assert [await sink.flush() for _ in range(5)] == [3, 0, 0, 0, 0]
+
+    assert [event["detail"]["username"] for event in fake.audit_events] == ["op0", "op1", "op2"]
+    assert len(fake.requests) == 4  # the rejected row is tried once and never again
+    dead, *sent = _rows(db)
+    assert (dead["dead_at"], dead["delivered_at"], dead["attempts"]) == (clock(), None, 1)
+    assert [(row["delivered_at"], row["dead_at"]) for row in sent] == [(clock(), None)] * 3
+    assert _warning_lines(caplog) == [
+        f"audit event {dead['id']} (login_failed) rejected by the API with HTTP {status}; it will not be retried"]
+    assert "poison" not in caplog.text
+
+
+async def test_alerts_after_a_rejected_alert_still_go_out(sink, db, fake):
+    _reject_poison(fake, 422)
+    sink.record("refresh_reuse_revoked", session_id="fam-1", user_id="u-9", username="poison", client_id="jarvis")
+    sink.record("login_ok", username="operator")
+    sink.record("lockout", scope="user", username="operator", seconds=900)
+
+    assert await sink.flush() == 2
+
+    assert [event["event"] for event in fake.audit_events] == ["lockout", "login_ok"]
+    assert [row["dead_at"] is not None for row in _rows(db)] == [True, False, False]
 
 
 async def test_local_only_event_not_sent(sink, db, fake):
@@ -182,7 +267,7 @@ async def test_alert_events_logged_and_sent_first(sink, db, fake, clock, caplog)
     clock.advance(1)
     sink.record("lockout", scope="global", username=None, seconds=900, password="hunter2")
 
-    lines = _alert_lines(caplog)
+    lines = _warning_lines(caplog)
     assert len(lines) == 2
     prefix = "mcp auth alert: refresh_reuse_revoked "
     assert lines[0].startswith(prefix)
@@ -276,18 +361,20 @@ async def test_flush_loop_outlives_a_failing_flush(sink, fake, caplog, monkeypat
     assert "database is locked" not in caplog.text
 
 
-async def test_purge_drops_delivered_rows_older_than_90_days(sink, db, clock):
+async def test_purge_drops_delivered_and_rejected_rows_older_than_90_days(sink, db, clock):
     sink.record("login_ok", username="old-delivered")
     sink.record("login_failed", username="old-undelivered")
     sink.record("signing_key_rotated", kid="old-local")
+    sink.record("login_failed", username="old-rejected")
     db.query("UPDATE auth_events SET delivered_at = at WHERE id = 1")
+    db.query("UPDATE auth_events SET dead_at = at WHERE id = 4")
     clock.advance(DAY_S)
     sink.record("enrolled", username="recent-delivered")
-    db.query("UPDATE auth_events SET delivered_at = at WHERE id = 4")
+    db.query("UPDATE auth_events SET delivered_at = at WHERE id = 5")
 
-    clock.advance(90 * DAY_S - DAY_S)  # the first three rows are exactly 90 days old
+    clock.advance(90 * DAY_S - DAY_S)  # the first four rows are exactly 90 days old
     sink.purge()
-    assert len(_rows(db)) == 4
+    assert len(_rows(db)) == 5
 
     clock.advance(1)
     sink.purge()

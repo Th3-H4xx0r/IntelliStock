@@ -216,17 +216,19 @@ async def test_verify_password_outcomes(fake, api):
 async def test_post_audit_event_body_shape(fake, api):
     detail = {"username": "operator", "user_id": "u-123"}
 
-    assert await api.post_audit_event("login_ok", detail) is True
+    assert await api.post_audit_event("login_ok", detail) == 204
 
     assert fake.audit_events == [{"kind": "auth", "event": "login_ok", "detail": detail}]
     request = fake.requests[0]
     assert (request.method, _raw_path(request)) == ("POST", "/internal/mcp/audit-event")
     assert "x-mcp-acting-user" not in request.headers
 
-    fake.set_route("POST", "/internal/mcp/audit-event", 503, {"detail": "redeploying"})
-    assert await api.post_audit_event("login_ok", detail) is False
+    # The status goes back as is: the caller decides what is retried.
+    for status in (503, 413, 401):
+        fake.set_route("POST", "/internal/mcp/audit-event", status, {"detail": "no"})
+        assert await api.post_audit_event("login_ok", detail) == status
     fake.set_route("POST", "/internal/mcp/audit-event", 204, _connect_error)
-    assert await api.post_audit_event("login_ok", detail) is False
+    assert await api.post_audit_event("login_ok", detail) is None
     assert len(fake.audit_events) == 1
 
 

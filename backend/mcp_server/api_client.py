@@ -208,14 +208,18 @@ class ApiClient:
             return PasswordCheck("throttled", retry_after_s=_retry_after(resp))
         return PasswordCheck("unavailable")
 
-    async def post_audit_event(self, event: str, detail: Mapping[str, Any]) -> bool:
-        """True when the API accepted the event (2xx); False otherwise, so the caller retries."""
+    async def post_audit_event(self, event: str, detail: Mapping[str, Any]) -> Optional[int]:
+        """The HTTP status the API answered, or None when it could not be reached.
+
+        What to retry is the caller's decision (AuditSink.flush): a 5xx is not a
+        rejection, and some 4xx answers reject every event alike.
+        """
         try:
             resp = await self.request("POST", AUDIT_EVENT_PATH, acting_user=None,
                                       json_body={"kind": "auth", "event": event, "detail": dict(detail)})
         except ApiUnavailable:
-            return False
-        return 200 <= resp.status < 300
+            return None
+        return resp.status
 
     async def aclose(self) -> None:
         await self._client.aclose()
