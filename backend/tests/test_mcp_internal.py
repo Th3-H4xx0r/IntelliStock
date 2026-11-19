@@ -15,6 +15,8 @@ import json
 from unittest.mock import Mock
 
 import pytest
+from fastapi import FastAPI
+from pydantic import BaseModel
 
 import apns_sender
 import auth_utils
@@ -24,6 +26,7 @@ from api.mcp_routes import AUTH_EVENTS, DISCORD_RELAYED_EVENTS, build_internal_o
 from mcp_helpers import (
     PEER_OUT, make_probe_app, mcp_client, mcp_env, public_client, seed_operator, use_store,
 )
+from mcp_policy import mcp_policy
 
 OPENAPI = "/internal/mcp/openapi.json"
 VERIFY = "/internal/mcp/verify-password"
@@ -135,7 +138,9 @@ def test_internal_openapi_excludes_never_and_keeps_x_mcp():
     assert doc["paths"]["/instances/{instance_id}/live-command"]["post"]["x-mcp"] == {
         "class": "money", "tool": "live_command", "target": {"instance": "instance_id"}}
     assert "LoginBody" not in doc.get("components", {}).get("schemas", {})
-    expected = hashlib.sha256(json.dumps(doc["paths"], sort_keys=True, separators=(",", ":"),
+    # Contract §4: the hash covers paths AND components, so a model change is seen.
+    expected = hashlib.sha256(json.dumps({"paths": doc["paths"], "components": doc.get("components") or {}},
+                                         sort_keys=True, separators=(",", ":"),
                                          ensure_ascii=False).encode("utf-8")).hexdigest()
     assert doc["x-mcp-schema-hash"] == expected
     assert schema_hash(main.app) == expected
@@ -167,7 +172,39 @@ def test_build_internal_openapi_filters_a_probe_app():
     assert doc["paths"]["/probe/instances/{instance_id}/act"]["post"]["x-mcp"]["class"] == "money"
     for gone in ("/probe/never", "/probe/unannotated", "/mcp/approval-devices", OPENAPI, VERIFY, AUDIT_EVENT):
         assert gone not in doc["paths"]
-    assert doc["x-mcp-schema-hash"] == _canonical_sha256(doc["paths"])
+    assert doc["x-mcp-schema-hash"] == _canonical_sha256({"paths": doc["paths"],
+                                                          "components": doc.get("components") or {}})
+
+
+def _app_with_body(model) -> FastAPI:
+    """A fresh app with one write route whose body is model. The annotation is
+    set by hand: under the __future__ import a local class name would stay a
+    string FastAPI cannot resolve."""
+    def make_thing(body):
+        """Make a thing."""
+        return {}
+
+    make_thing.__annotations__ = {"body": model}
+    app = FastAPI()
+    app.add_api_route("/things", make_thing, methods=["POST"], operation_id="make_thing",
+                      openapi_extra=mcp_policy("write"))
+    return app
+
+
+def test_a_body_model_change_alone_changes_the_hash():
+    class ThingBody(BaseModel):
+        name: str
+
+    v1 = build_internal_openapi(_app_with_body(ThingBody))
+
+    class ThingBody(BaseModel):  # noqa: F811 - the same schema name with one more field
+        name: str
+        size: int
+
+    v2 = build_internal_openapi(_app_with_body(ThingBody))
+    assert v1["paths"] == v2["paths"]                   # the $ref is the same
+    assert v1["components"]["schemas"]["ThingBody"] != v2["components"]["schemas"]["ThingBody"]
+    assert v1["x-mcp-schema-hash"] != v2["x-mcp-schema-hash"]
 
 
 def test_build_internal_openapi_is_cached_and_leaves_the_app_schema_alone():

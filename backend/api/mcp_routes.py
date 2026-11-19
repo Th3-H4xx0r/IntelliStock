@@ -125,8 +125,10 @@ def build_internal_openapi(app) -> dict:
     A deep copy of app.openapi() with only the operations an MCP caller may
     reach, each keeping its x-mcp object, and only the component schemas those
     operations reach, transitively. SCHEMA_HASH_KEY holds the sha256 of the
-    canonical JSON of "paths". Cached on app.state.mcp_internal_openapi: the
-    routes cannot change under a running app.
+    canonical JSON of {"paths", "components"} of this filtered document
+    (contract §4): FastAPI keeps body and response models in components, so a
+    hash of paths alone would miss a model change. Cached on
+    app.state.mcp_internal_openapi: the routes cannot change under a running app.
     """
     cached = getattr(app.state, "mcp_internal_openapi", None)
     if cached is not None:
@@ -144,7 +146,8 @@ def build_internal_openapi(app) -> dict:
                 reachable.add(name)
                 frontier |= _schema_refs(schemas[name])
         components["schemas"] = {name: schema for name, schema in schemas.items() if name in reachable}
-    doc[SCHEMA_HASH_KEY] = hashlib.sha256(canonical_json(doc["paths"])).hexdigest()
+    hashed = {"paths": doc["paths"], "components": doc.get("components") or {}}
+    doc[SCHEMA_HASH_KEY] = hashlib.sha256(canonical_json(hashed)).hexdigest()
     app.state.mcp_internal_openapi = doc
     return doc
 
