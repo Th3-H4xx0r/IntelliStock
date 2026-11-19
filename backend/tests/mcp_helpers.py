@@ -144,7 +144,8 @@ def public_client(app):
 
 
 def make_probe_app():
-    """A small app behind McpGateMiddleware whose routes depend on main.get_current_user.
+    """A small app behind McpGateMiddleware whose routes depend on main.get_current_user,
+    plus the real /mcp/approvals routes (api.mcp_routes).
 
     Returns (app, calls). Each route counts its calls in calls["count"][operation_id]
     and records the body it received (calls["body"]) and its principal
@@ -152,12 +153,13 @@ def make_probe_app():
     """
     from fastapi import Body, Depends, FastAPI
 
-    from api import main
+    from api import main, mcp_routes
     from api.mcp_gate import McpGateMiddleware
     from mcp_policy import mcp_policy
 
     app = FastAPI()
     app.add_middleware(McpGateMiddleware)
+    app.include_router(mcp_routes.build_router(main.get_current_user))
     calls: dict = {"count": {}, "body": None, "principal": None}
 
     def hit(operation_id: str, user: dict, body: object = None) -> None:

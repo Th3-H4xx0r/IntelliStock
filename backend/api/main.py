@@ -2363,6 +2363,11 @@ from api import app_updates  # noqa: E402
 
 app.include_router(app_updates.build_router(get_current_user))
 
+# --- MCP approvals (/mcp/approvals*): held MCP calls awaiting a signed decision ---
+from api import mcp_routes  # noqa: E402
+
+app.include_router(mcp_routes.build_router(get_current_user))
+
 
 @app.get("/tickers", response_class=JSONResponse, operation_id="tickers", openapi_extra=mcp_policy("read"))
 def api_tickers(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):

@@ -21,13 +21,15 @@ if _BACKEND not in sys.path:
 
 from mcp_policy import NAME_RE, mcp_policy, validate_policy  # noqa: E402
 
-# The spec's direct tools: an x-mcp "tool" must name one of these.
+# The direct tools: the spec's 21 plus the two approval reads (contract §5). An
+# x-mcp "tool" must name one of these.
 EXPECTED_DIRECT_TOOLS = frozenset({
     "list_instances", "get_instance", "get_live_state", "get_instance_portfolio_history",
     "get_account_summary", "get_positions", "get_orders", "list_backtests",
     "get_backtest_status", "get_backtest_summary", "create_backtest", "stop_backtest",
     "list_strategies", "get_strategy", "get_symbol_info", "get_symbol_historicals",
     "get_market_news", "list_swing_signals", "start_instance", "stop_instance", "live_command",
+    "list_pending_approvals", "get_approval",
 })
 
 
